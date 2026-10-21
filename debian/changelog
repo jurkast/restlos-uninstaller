@@ -1,3 +1,9 @@
+restlos-uninstaller (2.1.0-1ppa1) UNRELEASED; urgency=medium
+
+  * Restlos Bewerbung design, signed hourly self-updates, fixed update repository.
+
+ -- jurkast <312310339+jurkast@users.noreply.github.com>  Wed, 21 Oct 2026 23:44:12 +0200
+
 restlos-uninstaller (2.0.0-1ppa1) UNRELEASED; urgency=medium
 
   * Adopt the Restlos AIR visual design language.

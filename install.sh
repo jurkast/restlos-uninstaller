@@ -81,6 +81,7 @@ for required in \
     "restlos/package_managers.py" \
     "restlos/recovery.py" \
     "restlos/updater.py" \
+    "restlos/update-public.pem" \
     "restlos/game_scanners.py" \
     "run_restlos.py" \
     "assets/restlos-wrapper" \

@@ -359,6 +359,113 @@ ENGLISH: dict[str, str] = {
 }
 
 
+# Restlos-Design und signierte Updates (2.1)
+ENGLISH.update({
+    "Noch nicht geprüft. Die erste Prüfung startet kurz nach dem Öffnen.": "Not checked yet. The first check starts shortly after opening.",
+    "Darstellung wie System": "Follow system appearance",
+    "Menü": "Menu",
+    "Zwischen heller und dunkler Darstellung wechseln": "Switch between light and dark appearance",
+    "Wird eingelesen …": "Scanning…",
+    "Automatisch stündlich prüfen und im Hintergrund vorbereiten": "Check hourly and prepare updates in the background",
+    "Restlos prüft stündlich das neueste GitHub-Release und lädt es im Hintergrund.": "Restlos checks the latest GitHub release every hour and downloads it in the background.",
+    "Jedes Update ist mit Ed25519 signiert; Prüfsumme und Größe werden kontrolliert.": "Every update is signed with Ed25519; checksum and size are verified.",
+    "Die neue Version liegt nur in deinem Benutzerordner – kein Passwort, kein Systemeingriff.": "The new version lives only in your home folder – no password, no system changes.",
+    "Startet eine neue Version nicht, schaltet Restlos automatisch zurück.": "If a new version fails to start, Restlos switches back automatically.",
+    "Protokolle, Wiederherstellungsdaten und Einstellungen bleiben unverändert.": "History, recovery data and settings stay untouched.",
+    "GitHub-Benutzer/Repository der Updatequelle": "GitHub user/repository of the update source",
+    "geprüft {time}": "checked {time}",
+    "Automatische Updates sind ausgeschaltet.": "Automatic updates are turned off.",
+    "Restlos Uninstaller {version} ist geprüft und bereit.": "Restlos Uninstaller {version} is verified and ready.",
+    "Hell / Dunkel": "Light / Dark",
+    "ARBEITSPLATZ": "WORKSPACE",
+    "Programme entfernen": "Remove programs",
+    "Wiederherstellung": "Recovery",
+    "Updates & Startcheck": "Updates & startup check",
+    "WERKZEUGE": "TOOLS",
+    "Protokolle": "History",
+    "● Lokal auf deinem Computer": "● Local on your computer",
+    "Kein Konto, keine Cloud. Löschplan vor jeder Entfernung.": "No account, no cloud. A removal plan before every removal.",
+    "Version {version} · Dein Deinstaller": "Version {version} · Your uninstaller",
+    "SICHER DEINSTALLIEREN": "SAFE UNINSTALLING",
+    "Programme & Spiele": "Programs & games",
+    "Restlos erstellt zuerst einen überprüfbaren Löschplan. Erst nach deiner Bestätigung wird entfernt – Benutzerdaten landen standardmäßig im Papierkorb.": "Restlos first creates a reviewable removal plan. Nothing is removed before you confirm – user data goes to the trash by default.",
+    "Anwendungen erkannt": "applications found",
+    "Neu prüfen": "Check again",
+    "WIEDERHERSTELLUNG": "RECOVERY",
+    "Daten zurückholen": "Restore data",
+    "PROGRAMMUPDATES": "PROGRAM UPDATES",
+    "Programmupdates": "Program updates",
+    "Jetzt neu starten und aktualisieren": "Restart and update now",
+    "Jetzt prüfen": "Check now",
+    "Zur vorherigen Version zurückschalten": "Switch back to the previous version",
+    "So funktioniert das Update": "How updating works",
+    "Speichern": "Save",
+    "UPDATEQUELLE": "UPDATE SOURCE",
+    "Startcheck": "Startup check",
+    "Was Restlos auf diesem Computer vorfindet:": "What Restlos finds on this computer:",
+    "Installiert: Version {version}": "Installed: version {version}",
+    "GTK {gtk} · Python {python}": "GTK {gtk} · Python {python}",
+    "Version {version} ist geprüft und bereit. Sie startet beim nächsten Öffnen – oder sofort per Neustart.": "Version {version} is verified and ready. It starts the next time you open Restlos – or right away with a restart.",
+    "Bitte warten, bis die laufende Aktion abgeschlossen ist. Danach neu starten.": "Please wait until the running operation has finished, then restart.",
+    "Beim nächsten Start verwendet Restlos wieder die vorherige Version.": "Restlos will use the previous version again on the next start.",
+    "Update-Einstellungen gespeichert.": "Update settings saved.",
+    "OK": "OK",
+    "Paketaktionen, Programmordner und Restdaten – jeder Pfad mit Begründung und Größe.": "Package operations, program folders and leftovers – every path with reason and size.",
+    "Papierkorb": "Trash",
+    "Benutzerdaten bleiben wiederherstellbar, bis du den Papierkorb leerst.": "User data stays recoverable until you empty the trash.",
+    "Safety Backup": "Safety Backup",
+    "Vor endgültigem Löschen werden Einstellungen und Spielstände gesichert.": "Settings and saved games are backed up before permanent deletion.",
+    "Updates werden geprüft und gegebenenfalls im Hintergrund vorbereitet …": "Checking for updates and preparing them in the background…",
+    "Administratorrechte über PolicyKit (pkexec) verfügbar": "Administrator rights available via PolicyKit (pkexec)",
+    "pkexec fehlt – Systempakete können nicht entfernt werden": "pkexec is missing – system packages cannot be removed",
+    "OpenSSL für signierte Updates vorhanden": "OpenSSL available for signed updates",
+    "OpenSSL fehlt – Updates können nicht geprüft werden": "OpenSSL is missing – updates cannot be verified",
+    "Paketquellen: {names}": "Package sources: {names}",
+    "Keine bekannte Paketverwaltung gefunden": "No known package manager found",
+    "Restlos ist auf dem aktuellen Stand.": "Restlos is up to date.",
+    "Version {version} wird übersprungen, weil sie nicht starten konnte. Die nächste Version kommt wieder automatisch.": "Version {version} is skipped because it failed to start. The next version will be installed automatically again.",
+    "Zur vorherigen Version zurückgeschaltet. Version {version} wird übersprungen.": "Switched back to the previous version. Version {version} will be skipped.",
+    "Das letzte Update konnte nicht starten. Restlos verwendet wieder die vorherige Version.": "The last update failed to start. Restlos is using the previous version again.",
+    "Es ist kein vorbereitetes Update vorhanden.": "There is no prepared update.",
+    "Zurückschalten fehlgeschlagen": "Switching back failed",
+    "Einstellung nicht gespeichert": "Setting not saved",
+    "Neustart fehlgeschlagen: {error}": "Restart failed: {error}",
+    # Meldungen aus restlos/updater.py
+    "Ungültige Versionsnummer.": "Invalid version number.",
+    "Die Programmversion konnte nicht gelesen werden.": "The program version could not be read.",
+    "Der Download wurde an eine unerwartete Adresse umgeleitet.": "The download was redirected to an unexpected address.",
+    "Bitte GitHub-Benutzer/Repository eingeben, zum Beispiel jurkast/restlos-uninstaller.": "Please enter GitHub user/repository, for example jurkast/restlos-uninstaller.",
+    "Der öffentliche Update-Schlüssel fehlt in dieser Installation.": "The public update key is missing from this installation.",
+    "OpenSSL fehlt. Bitte das Paket „openssl“ installieren.": "OpenSSL is missing. Please install the “openssl” package.",
+    "Die Update-Signatur konnte nicht geprüft werden.": "The update signature could not be checked.",
+    "Diese Installation wird über pip aktualisiert, nicht über das In-App-Update.": "This installation is updated with pip, not with the in-app update.",
+    "RESTLOS BLEIBT BEI DIR": "RESTLOS STAYS WITH YOU",
+    "Neue Funktionen. Deine Daten bleiben lokal.": "New features. Your data stays local.",
+    "GitHub liefert ausschließlich Programmupdates. Löschprotokolle, Wiederherstellungsdaten und Einstellungen werden nicht hochgeladen.": "GitHub only delivers program updates. Removal logs, recovery data and settings are never uploaded.",
+    "Aktive Version": "Active version",
+    "Die Update-Signatur ist ungültig. Es wird nichts installiert.": "The update signature is invalid. Nothing will be installed.",
+    "Ungültige Update-Beschreibung.": "Invalid update description.",
+    "Das Update passt nicht zu Restlos Uninstaller.": "The update does not belong to Restlos Uninstaller.",
+    "Ungültige Update-Größe.": "Invalid update size.",
+    "Dieses Update benötigt einmalig ein neueres Installationspaket.": "This update requires a newer installation package once.",
+    "Ungültige Update-Adresse.": "Invalid update address.",
+    "Noch kein passendes Update-Release gefunden.": "No matching update release found yet.",
+    "Die Updatequelle ist momentan nicht erreichbar. Die installierte Version bleibt nutzbar.": "The update source is currently unreachable. The installed version remains usable.",
+    "Die Update-Datei überschreitet die erlaubte Größe.": "The update file exceeds the allowed size.",
+    "Der Download hat zu lange gedauert. Bitte später erneut versuchen.": "The download took too long. Please try again later.",
+    "Die Update-Datei ist beschädigt oder verändert. Es wird nichts installiert.": "The update file is damaged or modified. Nothing will be installed.",
+    "Für ein sicheres Update werden mindestens 200 MB freier Speicher benötigt.": "A safe update needs at least 200 MB of free space.",
+    "Die Versionsangabe im Update stimmt nicht überein.": "The version in the update does not match.",
+    "Versionsprüfung fehlgeschlagen.": "Version check failed.",
+    "Das Update-Archiv enthält unerwartet viele Einträge.": "The update archive contains unexpectedly many entries.",
+    "Das Update-Archiv enthält einen unsicheren Pfad.": "The update archive contains an unsafe path.",
+    "Links oder Spezialdateien im Update-Archiv wurden abgelehnt.": "Links or special files in the update archive were rejected.",
+    "Der entpackte Inhalt überschreitet das Größenlimit.": "The extracted content exceeds the size limit.",
+    "Eine Datei im Update-Archiv konnte nicht gelesen werden.": "A file in the update archive could not be read.",
+    "Das Update-Archiv besitzt keine gültige Wurzel.": "The update archive has no valid root folder.",
+})
+
+
 _language = "de"
 
 
@@ -393,9 +500,28 @@ class LanguageSettings:
         selected = self.selected()
         return _system_language() if selected == "system" else selected
 
+    def value(self, key: str, default: str = "") -> str:
+        """Weitere Einstellung (z. B. Darstellung) aus derselben privaten Datei lesen."""
+        try:
+            if self.path.stat().st_size > 100_000 or self.path.is_symlink():
+                return default
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return default
+        found = payload.get(key) if isinstance(payload, dict) else None
+        return found if isinstance(found, str) else default
+
+    def update(self, **values: str) -> None:
+        if "appearance" in values and values["appearance"] not in {"system", "light", "dark"}:
+            raise ValueError(f"Unsupported appearance: {values['appearance']}")
+        self._write(values)
+
     def set(self, language: str) -> None:
         if language not in SUPPORTED_LANGUAGES:
             raise ValueError(f"Unsupported language: {language}")
+        self._write({"language": language})
+
+    def _write(self, values: dict[str, str]) -> None:
         payload: dict[str, Any] = {}
         try:
             existing = json.loads(self.path.read_text(encoding="utf-8"))
@@ -403,7 +529,7 @@ class LanguageSettings:
                 payload.update(existing)
         except (OSError, UnicodeError, json.JSONDecodeError):
             pass
-        payload["language"] = language
+        payload.update(values)
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         temporary_name = ""
         try:
@@ -464,6 +590,10 @@ def display_text(message: str) -> str:
         "Die installierte Version konnte nicht geprüft werden: ": "The installed version could not be verified: ",
         "Das Update-Archiv konnte nicht gespeichert werden: ": "The update archive could not be saved: ",
         "Das Update-Archiv konnte nicht entpackt werden: ": "The update archive could not be extracted: ",
+        "Das Update ist unvollständig: ": "The update is incomplete: ",
+        "GitHub ist momentan nicht erreichbar (HTTP ": "GitHub is currently unreachable (HTTP ",
+        "Update konnte nicht gestartet werden: ": "The update could not be started: ",
+        "Update konnte nicht vorbereitet werden: ": "The update could not be prepared: ",
     }
     for prefix, replacement in prefixes.items():
         if message.startswith(prefix):

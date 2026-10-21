@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import sys
 import threading
+import time
 from pathlib import Path
 
 import gi
@@ -20,286 +23,215 @@ from .models import AppRecord, Confidence, RecoveryRecord, RemovalPlan, RemovalR
 from .recovery import RecoveryManager
 from .remover import RemovalExecutor
 from .scanners import ApplicationScanner
-from .updater import ReleaseInfo, UpdateClient, UpdateError, UpdateState, is_system_managed_install
+from .updater import CHECK_INTERVAL_SECONDS, FIRST_CHECK_DELAY_SECONDS, Updater, UpdateError, UpdateStatus
 from .utils import format_size
 
 
-CSS = b"""
-/* Restlos AIR design language: translucent surfaces, mint accents and calm cards. */
-window.restlos-root { background-color: transparent; }
-window.restlos-root headerbar {
-  min-height: 58px;
+ICON_PATH = Path(__file__).with_name("icon.svg")
+
+# Restlos-Designsprache (wie Restlos Bewerbung): dunkle Petrol-Navigation, helle Karten,
+# Mint-Akzent, dunkles Hero-Feld und Hinweise unten rechts. GTK 4.6 kennt keine CSS-Variablen,
+# daher stehen die Farben je Modus in eigenen Blöcken.
+CSS = """
+window.restlos-root, window.restlos-root > contents { background-image: none; }
+headerbar.restlos-header {
+  min-height: 46px;
+  background-image: none;
+  background-color: #112c38;
+  color: #d9e8ec;
+  border-bottom: 1px solid #0b222c;
   box-shadow: none;
 }
-.brand-name {
-  font-size: 0.76em;
-  font-weight: 750;
-  letter-spacing: 3px;
+headerbar.restlos-header button { color: #d9e8ec; background-color: transparent; border-color: transparent; }
+headerbar.restlos-header button:hover { background-color: #244652; }
+headerbar.restlos-header .header-title { font-weight: 700; }
+headerbar.restlos-header windowcontrols button { color: #d9e8ec; }
+
+/* Navigation */
+.nav-sidebar { background-color: #112c38; color: #d9e8ec; padding: 26px 18px 18px 18px; }
+.brand-name { font-size: 1.25em; font-weight: 800; letter-spacing: -0.4px; color: #ffffff; }
+.brand-sub { font-size: 0.72em; letter-spacing: 2px; color: #8faeb9; font-weight: 700; }
+.side-title { font-size: 0.70em; letter-spacing: 2px; color: #7e9ba7; font-weight: 700; margin: 22px 12px 6px 12px; }
+button.nav {
+  background-image: none; background-color: transparent; color: #c0d2d9;
+  border: none; border-radius: 9px; padding: 10px 12px; box-shadow: none; font-weight: 600;
 }
-.header-tagline { font-size: 0.90em; font-weight: 650; }
-.sidebar {
-  border-right: 1px solid;
+button.nav:hover { background-color: #1b3b48; color: #e8f4f6; }
+button.nav.active { background-color: #244652; color: #9bf1dc; }
+.nav-count { font-size: 0.80em; color: #8faeb9; }
+button.nav.active .nav-count { color: #9bf1dc; }
+.side-bottom { border-top: 1px solid #34505a; padding-top: 16px; color: #92b8bc; font-size: 0.86em; }
+.side-bottom .local { color: #6ce0c3; font-weight: 700; }
+.side-bottom button {
+  background-image: none; background-color: transparent; color: #c8dce0;
+  border: 1px solid #34505a; border-radius: 9px; padding: 6px 10px; box-shadow: none;
 }
-.sidebar-heading, .eyebrow, .stat-heading {
-  font-size: 0.76em;
-  font-weight: 750;
-  letter-spacing: 2px;
+.side-bottom button:hover { background-color: #1b3b48; }
+.side-version { color: #7e9ba7; font-size: 0.86em; }
+
+/* Grundelemente */
+.eyebrow { font-size: 0.72em; font-weight: 800; letter-spacing: 2px; }
+.page-title { font-size: 1.95em; font-weight: 800; letter-spacing: -0.8px; }
+.section-title { font-size: 1.15em; font-weight: 750; }
+.hero-title { font-size: 1.55em; font-weight: 750; letter-spacing: -0.4px; }
+.empty-title { font-size: 1.40em; font-weight: 750; }
+.app-name { font-weight: 700; }
+.app-source { font-size: 0.86em; }
+.card, .stat-tile, .safety-card, .warning-card, .info-card, .list-card, .detail-hero {
+  border-radius: 15px; border: 1px solid; padding: 18px;
 }
-button,
-menubutton > button,
-dropdown > button {
-  border: 1px solid transparent;
-  border-radius: 9px;
-  box-shadow: none;
-  text-shadow: none;
-  padding: 8px 12px;
+.list-card { padding: 14px; }
+.stat-tile { border-radius: 12px; padding: 13px 15px; }
+.stat-heading { font-size: 0.72em; font-weight: 800; letter-spacing: 1.6px; }
+.stat-value { font-size: 1.35em; font-weight: 800; }
+.hero {
+  border-radius: 17px; padding: 26px 30px; background-color: #183c48; color: #ffffff;
 }
-button:focus,
-entry:focus,
-dropdown > button:focus { border-color: #55bda3; box-shadow: 0 0 0 1px #55bda3; }
-button.destructive-action {
-  color: #fff4ee;
-  background: #a74434;
-  border-color: #c65a47;
-  font-weight: 750;
-}
-button.destructive-action:hover { background: #bd513f; }
-entry,
-searchentry,
-dropdown > button {
-  border: 1px solid;
-  border-radius: 9px;
-}
-popover contents {
-  border: 1px solid;
-  border-radius: 10px;
-}
-checkbutton check {
-  border: 1px solid;
-  border-radius: 5px;
-}
-checkbutton check:checked { color: #0d171d; background: #84dfc5; border-color: #84dfc5; }
-separator, paned > separator { min-width: 1px; min-height: 1px; }
-scrollbar slider { border-radius: 999px; }
-progressbar trough { border-radius: 999px; }
-progressbar progress { background: #84dfc5; border-radius: 999px; }
-.scan-card {
-  padding: 10px 12px;
-  border-radius: 10px;
-  border: 1px solid;
-}
-.app-list { background: transparent; }
-.app-list row { border-radius: 10px; margin: 3px 0; }
-.app-name { font-weight: 750; }
-.app-source { font-size: 0.88em; }
-.source-badge {
-  border-radius: 999px;
-  padding: 4px 10px;
-  font-size: 0.84em;
-  font-weight: 750;
-}
-.hero-card, .card, .safety-card, .stat-tile {
-  border: 1px solid;
-}
-.hero-card { border-radius: 16px; padding: 18px; }
-.hero-title { font-size: 1.8em; font-weight: 650; }
-.section-title { font-size: 1.15em; font-weight: 650; }
-.card { border-radius: 13px; padding: 14px; }
-.stat-tile { border-radius: 12px; padding: 13px; }
-.stat-value { font-size: 1.25em; font-weight: 650; }
-.safety-card { border-radius: 13px; padding: 14px; }
-.action-bar {
-  padding-top: 12px;
-  border-top: 1px solid;
-}
-.warning-card {
-  border: 1px solid;
-  border-radius: 12px;
-  padding: 12px;
-}
-.warning-row { padding: 2px 0; }
-button.warning-more {
-  min-width: 28px;
-  min-height: 28px;
-  padding: 0 7px;
-  background: transparent;
-  font-weight: 800;
-}
+.hero .hero-text { color: #b7d0d8; }
+.hero .hero-number { font-size: 3.2em; font-weight: 800; color: #8ee6cf; }
+.hero .hero-number-label { color: #b7d0d8; font-size: 0.86em; }
+.hero .hero-version { font-size: 2.3em; }
+window.restlos-light .hero .hero-eyebrow, window.restlos-dark .hero .hero-eyebrow { color: #8ee6cf; }
+.pill { border-radius: 999px; padding: 5px 11px; font-size: 0.82em; font-weight: 700; }
+.source-badge { border-radius: 999px; padding: 4px 10px; font-size: 0.84em; font-weight: 700; }
+.info-icon { border-radius: 12px; padding: 12px; }
+.scan-card { border-radius: 10px; padding: 9px 11px; }
+.app-list { background-color: transparent; }
+.app-list row { border-radius: 10px; margin: 2px 0; }
 .target-row { border-bottom: 1px solid; padding: 9px 4px; }
+.warning-row { padding: 2px 0; }
+.action-bar { padding-top: 12px; border-top: 1px solid; }
 .danger-note { font-weight: 700; }
-.empty-title { font-size: 1.5em; font-weight: 650; }
+.status-line { border-radius: 8px; padding: 11px 13px; }
+.status-line.good { border-left: 3px solid #2b9a7e; }
+.status-line.warn { border-left: 3px solid #cb9336; }
+.status-line.bad { border-left: 3px solid #c0533f; }
+button.warning-more { min-width: 28px; min-height: 28px; padding: 0 7px; background-image: none; background-color: transparent; font-weight: 800; }
 
-/* AIR dark mode: the original deep-petrol, slightly translucent surface. */
-window.restlos-dark {
-  color: #ecf5f2;
-  background-color: rgba(13, 23, 29, 0.96);
+button, menubutton > button, dropdown > button {
+  background-image: none; border: 1px solid; border-radius: 9px; padding: 8px 14px; box-shadow: none; text-shadow: none;
 }
-window.restlos-dark headerbar {
-  color: #ecf5f2;
-  background-color: rgba(13, 23, 29, 0.94);
-  border-bottom: 1px solid rgba(76, 103, 111, 0.68);
+entry, searchentry, dropdown > button { border: 1px solid; border-radius: 8px; }
+button.primary, button.suggested-action {
+  color: #ffffff; background-color: #167c77; border-color: #167c77; font-weight: 700;
 }
-window.restlos-dark .brand-name,
-window.restlos-dark .muted,
-window.restlos-dark .app-source { color: #a6babc; }
-window.restlos-dark .header-tagline,
-window.restlos-dark .hero-title,
-window.restlos-dark .section-title,
-window.restlos-dark .stat-value,
-window.restlos-dark .empty-title { color: #ecf5f2; }
-window.restlos-dark .sidebar-heading,
-window.restlos-dark .eyebrow,
-window.restlos-dark .stat-heading { color: #9bb1b5; }
-window.restlos-dark .sidebar {
-  background-color: rgba(16, 30, 36, 0.91);
-  border-color: rgba(76, 103, 111, 0.64);
-}
-window.restlos-dark button,
-window.restlos-dark menubutton > button,
-window.restlos-dark dropdown > button { color: #e6f4f0; background-color: rgba(35, 53, 60, 0.94); }
-window.restlos-dark button:hover,
-window.restlos-dark menubutton > button:hover,
-window.restlos-dark dropdown > button:hover { background-color: rgba(48, 74, 83, 0.96); }
-window.restlos-dark button:checked { background-color: #36594f; }
-window.restlos-dark button:disabled { color: #778b8f; background-color: rgba(27, 41, 47, 0.88); }
-window.restlos-dark button.accent-button { color: #a9f2dd; background-color: #27433f; border-color: #3c665e; }
-window.restlos-dark entry,
-window.restlos-dark searchentry,
-window.restlos-dark dropdown > button { color: #ecf5f2; background-color: rgba(25, 42, 49, 0.94); border-color: #3c555d; }
-window.restlos-dark entry selection { color: #0d171d; background-color: #84dfc5; }
-window.restlos-dark popover contents { color: #ecf5f2; background-color: rgba(25, 42, 49, 0.98); border-color: #35505a; }
-window.restlos-dark popover modelbutton:hover { background-color: #304a53; }
-window.restlos-dark separator,
-window.restlos-dark paned > separator { background-color: #2d4147; }
-window.restlos-dark scrollbar slider { background-color: #45616a; }
-window.restlos-dark scrollbar slider:hover { background-color: #5c7a83; }
-window.restlos-dark checkbutton check { color: #0d171d; background-color: #192a31; border-color: #58717a; }
-window.restlos-dark progressbar trough { background-color: #23353c; }
-window.restlos-dark .scan-card { background-color: rgba(25, 42, 49, 0.90); border-color: rgba(76, 103, 111, 0.62); }
-window.restlos-dark .app-list { color: #ecf5f2; }
-window.restlos-dark .app-list row:hover { background-color: rgba(25, 42, 49, 0.88); }
-window.restlos-dark .app-list row:selected { color: #ecf5f2; background-color: rgba(38, 61, 67, 0.96); }
-window.restlos-dark .source-badge { color: #84dfc5; background-color: #27433f; }
-window.restlos-dark .hero-card,
-window.restlos-dark .card,
-window.restlos-dark .safety-card,
-window.restlos-dark .stat-tile { color: #ecf5f2; background-color: rgba(25, 42, 49, 0.92); border-color: rgba(76, 103, 111, 0.62); }
-window.restlos-dark .action-bar { border-color: rgba(76, 103, 111, 0.62); }
-window.restlos-dark .warning-card { color: #f2d0a8; background-color: rgba(53, 41, 30, 0.94); border-color: #6f563b; }
-window.restlos-dark button.warning-more { color: #f2d0a8; background-color: transparent; border-color: #6f563b; }
-window.restlos-dark button.warning-more:hover { background-color: #4a3827; }
-window.restlos-dark .target-row { border-color: #2d4147; }
-window.restlos-dark .target-row:hover { color: #ecf5f2; background-color: rgba(32, 52, 59, 0.94); }
-window.restlos-dark .confidence-certain { color: #84dfc5; }
-window.restlos-dark .confidence-high { color: #8fc9ff; }
-window.restlos-dark .confidence-possible { color: #f2ba79; }
-window.restlos-dark .danger-note { color: #ff9284; }
+button.primary:hover, button.suggested-action:hover { background-color: #1b8f89; }
+button.destructive-action { color: #fff6f2; background-color: #b0473a; border-color: #b0473a; font-weight: 700; }
+button.destructive-action:hover { background-color: #c25244; }
+button:focus-visible, entry:focus-within, dropdown > button:focus-visible { outline: 2px solid #50b9ae; outline-offset: 1px; }
+checkbutton check { border: 1px solid; border-radius: 5px; }
+checkbutton check:checked, switch:checked { background-color: #167c77; border-color: #167c77; color: #ffffff; }
+progressbar trough { border-radius: 999px; min-height: 8px; }
+progressbar progress { background-color: #167c77; border-radius: 999px; min-height: 8px; }
+scrollbar slider { border-radius: 999px; }
+popover contents { border-radius: 10px; }
+paned > separator { min-width: 8px; background-image: none; background-color: transparent; border: none; }
 
-/* AIR light mode: the same material and hierarchy with bright frosted surfaces. */
-window.restlos-light {
-  color: #17292d;
-  background-color: rgba(241, 248, 246, 0.96);
+/* Hinweis unten rechts (wie „notice“ in Restlos Bewerbung) */
+.notice {
+  background-color: #123c46; color: #ffffff; border-radius: 12px; padding: 14px 18px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.30);
 }
-window.restlos-light headerbar {
-  color: #17292d;
-  background-color: rgba(248, 252, 251, 0.94);
-  border-bottom: 1px solid rgba(148, 178, 171, 0.62);
+.notice button { background-image: none; color: #ffffff; background-color: transparent; border-color: #3d6670; }
+.notice button:hover { background-color: #1d4f5a; }
+.notice button.primary { background-color: #6ce0c3; color: #103945; border-color: #6ce0c3; }
+.notice button.primary:hover { background-color: #8ee6cf; }
+
+/* Hell */
+window.restlos-light { background-color: #f1f4f5; color: #203441; }
+window.restlos-light .main-area, window.restlos-light.dialog-surface { background-color: #f1f4f5; }
+window.restlos-light .muted, window.restlos-light .app-source { color: #667d89; }
+window.restlos-light .eyebrow, window.restlos-light .stat-heading { color: #167c77; }
+window.restlos-light .card, window.restlos-light .stat-tile, window.restlos-light .safety-card,
+window.restlos-light .info-card, window.restlos-light .list-card, window.restlos-light .detail-hero {
+  background-color: #ffffff; border-color: #dce5e7; color: #203441;
 }
-window.restlos-light .brand-name { color: #4e686c; }
-window.restlos-light .muted,
-window.restlos-light .app-source { color: #536b70; }
-window.restlos-light .header-tagline,
-window.restlos-light .hero-title,
-window.restlos-light .section-title,
-window.restlos-light .stat-value,
-window.restlos-light .empty-title { color: #17292d; }
-window.restlos-light .sidebar-heading,
-window.restlos-light .eyebrow,
-window.restlos-light .stat-heading { color: #587278; }
-window.restlos-light .sidebar {
-  background-color: rgba(226, 239, 235, 0.91);
-  border-color: rgba(148, 178, 171, 0.62);
+window.restlos-light .warning-card { background-color: #fff6e3; border-color: #e7cf98; color: #6a4a0e; }
+window.restlos-light button.warning-more { color: #6a4a0e; border-color: #d9bb72; }
+window.restlos-light .pill, window.restlos-light .source-badge { background-color: #dff3ed; color: #126b63; }
+window.restlos-light .info-icon { background-color: #e1f1ec; color: #167c77; }
+window.restlos-light .scan-card, window.restlos-light .status-line { background-color: #f8fafb; }
+window.restlos-light .app-list row, window.restlos-light list row { color: #203441; }
+window.restlos-light .app-list row:hover { background-color: #f1f6f7; }
+window.restlos-light .app-list row:selected { background-color: #dff3ed; color: #12352f; }
+window.restlos-light .target-row, window.restlos-light .action-bar { border-color: #e3eaec; }
+window.restlos-light button, window.restlos-light menubutton > button, window.restlos-light dropdown > button {
+  background-color: #ffffff; color: #203441; border-color: #dce5e7;
 }
-window.restlos-light button,
-window.restlos-light menubutton > button,
-window.restlos-light dropdown > button { color: #193338; background-color: rgba(219, 234, 230, 0.94); }
-window.restlos-light button:hover,
-window.restlos-light menubutton > button:hover,
-window.restlos-light dropdown > button:hover { background-color: rgba(200, 225, 218, 0.98); }
-window.restlos-light button:checked { color: #12342d; background-color: #b9ddd2; }
-window.restlos-light button:disabled { color: #849795; background-color: rgba(228, 237, 234, 0.88); }
-window.restlos-light button.accent-button { color: #124c40; background-color: #cce8df; border-color: #9dcfc1; }
-window.restlos-light entry,
-window.restlos-light searchentry,
-window.restlos-light dropdown > button { color: #17292d; background-color: rgba(251, 255, 254, 0.94); border-color: #a9c4bd; }
-window.restlos-light entry selection { color: #102521; background-color: #a8e7d5; }
-window.restlos-light popover contents { color: #17292d; background-color: rgba(249, 253, 252, 0.98); border-color: #b5ccc6; }
-window.restlos-light popover modelbutton:hover { background-color: #dcece8; }
-window.restlos-light separator,
-window.restlos-light paned > separator { background-color: #bfd3ce; }
-window.restlos-light scrollbar slider { background-color: #9ab6b0; }
-window.restlos-light scrollbar slider:hover { background-color: #789b94; }
-window.restlos-light checkbutton check { color: #0d171d; background-color: #f8fcfb; border-color: #8eaaa4; }
-window.restlos-light progressbar trough { background-color: #d6e5e1; }
-window.restlos-light .scan-card { background-color: rgba(240, 249, 247, 0.88); border-color: rgba(148, 178, 171, 0.58); }
-window.restlos-light .app-list { color: #17292d; }
-window.restlos-light .app-list row:hover { background-color: rgba(255, 255, 255, 0.66); }
-window.restlos-light .app-list row:selected { color: #132b2f; background-color: rgba(188, 222, 213, 0.90); }
-window.restlos-light .source-badge { color: #176652; background-color: #d3ece5; }
-window.restlos-light .hero-card,
-window.restlos-light .card,
-window.restlos-light .safety-card,
-window.restlos-light .stat-tile { color: #17292d; background-color: rgba(255, 255, 255, 0.88); border-color: rgba(148, 178, 171, 0.58); }
-window.restlos-light .action-bar { border-color: rgba(148, 178, 171, 0.58); }
-window.restlos-light .warning-card { color: #67470a; background-color: rgba(255, 246, 222, 0.94); border-color: #d6b96e; }
-window.restlos-light button.warning-more { color: #67470a; background-color: transparent; border-color: #c5a65b; }
-window.restlos-light button.warning-more:hover { background-color: #f5e5bc; }
-window.restlos-light .target-row { border-color: #c6d7d3; }
-window.restlos-light .target-row:hover { color: #17292d; background-color: rgba(232, 243, 240, 0.92); }
+window.restlos-light button:hover, window.restlos-light dropdown > button:hover { border-color: #167c77; }
+window.restlos-light button:disabled { color: #9aabb3; background-color: #f4f7f8; }
+window.restlos-light entry, window.restlos-light searchentry { background-color: #f8fafb; color: #203441; border-color: #dce5e7; }
+window.restlos-light checkbutton check { background-color: #ffffff; border-color: #a9bcc3; }
+window.restlos-light progressbar trough { background-color: #dce5e7; }
+window.restlos-light separator { background-color: #dce5e7; }
+window.restlos-light paned > separator, window.restlos-dark paned > separator { background-color: transparent; }
+window.restlos-light popover contents { background-color: #ffffff; color: #203441; border: 1px solid #dce5e7; }
 window.restlos-light .confidence-certain { color: #147a60; }
 window.restlos-light .confidence-high { color: #246cb0; }
 window.restlos-light .confidence-possible { color: #9a6400; }
 window.restlos-light .danger-note { color: #b52d25; }
 
-/* Semantic controls keep their meaning above the mode-wide button colors. */
-window.restlos-dark button.destructive-action,
-window.restlos-light button.destructive-action {
-  color: #fff4ee;
-  background-color: #a74434;
-  border-color: #c65a47;
+/* Dunkel */
+window.restlos-dark { background-color: #15232e; color: #e3edef; }
+window.restlos-dark .main-area, window.restlos-dark.dialog-surface { background-color: #15232e; }
+window.restlos-dark .muted, window.restlos-dark .app-source { color: #a6bbc5; }
+window.restlos-dark .eyebrow, window.restlos-dark .stat-heading { color: #6ce0c3; }
+window.restlos-dark .card, window.restlos-dark .stat-tile, window.restlos-dark .safety-card,
+window.restlos-dark .info-card, window.restlos-dark .list-card, window.restlos-dark .detail-hero {
+  background-color: #20323e; border-color: #3a505c; color: #e3edef;
 }
-window.restlos-dark button.destructive-action:hover,
-window.restlos-light button.destructive-action:hover { background-color: #bd513f; }
-window.restlos-dark button.destructive-action:disabled {
-  color: #778b8f;
-  background-color: rgba(27, 41, 47, 0.88);
-  border-color: #67443f;
+window.restlos-dark .warning-card { background-color: #3a2f1f; border-color: #6f563b; color: #f2d0a8; }
+window.restlos-dark button.warning-more { color: #f2d0a8; border-color: #6f563b; }
+window.restlos-dark .pill, window.restlos-dark .source-badge { background-color: #244652; color: #9bf1dc; }
+window.restlos-dark .info-icon { background-color: #244652; color: #9bf1dc; }
+window.restlos-dark .scan-card, window.restlos-dark .status-line { background-color: #172a35; }
+window.restlos-dark .app-list row, window.restlos-dark list row { color: #e3edef; }
+window.restlos-dark .app-list row:hover { background-color: #263b48; }
+window.restlos-dark .app-list row:selected { background-color: #244652; color: #e3edef; }
+window.restlos-dark .target-row, window.restlos-dark .action-bar { border-color: #31464f; }
+window.restlos-dark button, window.restlos-dark menubutton > button, window.restlos-dark dropdown > button {
+  background-color: #20323e; color: #e3edef; border-color: #3a505c;
 }
-window.restlos-light button.destructive-action:disabled {
-  color: #849795;
-  background-color: rgba(228, 237, 234, 0.88);
-  border-color: #d6aaa3;
+window.restlos-dark button:hover, window.restlos-dark dropdown > button:hover { border-color: #6ce0c3; }
+window.restlos-dark button:disabled { color: #6f8590; background-color: #1b2b36; }
+window.restlos-dark entry, window.restlos-dark searchentry { background-color: #172a35; color: #e3edef; border-color: #3a505c; }
+window.restlos-dark checkbutton check { background-color: #172a35; border-color: #58717a; }
+window.restlos-dark progressbar trough { background-color: #2b404b; }
+window.restlos-dark separator { background-color: #3a505c; }
+window.restlos-dark popover contents { background-color: #20323e; color: #e3edef; border: 1px solid #3a505c; }
+window.restlos-dark .confidence-certain { color: #84dfc5; }
+window.restlos-dark .confidence-high { color: #8fc9ff; }
+window.restlos-dark .confidence-possible { color: #f2ba79; }
+window.restlos-dark .danger-note { color: #ff9284; }
+
+/* Semantische Schaltflächen behalten ihre Farbe in beiden Modi. */
+window.restlos-light button.primary, window.restlos-dark button.primary,
+window.restlos-light button.suggested-action, window.restlos-dark button.suggested-action {
+  color: #ffffff; background-color: #167c77; border-color: #167c77;
 }
-window.restlos-dark button.suggested-action,
-window.restlos-light button.suggested-action {
-  color: #102521;
-  background-color: #84dfc5;
-  border-color: #55bda3;
+window.restlos-light button.destructive-action, window.restlos-dark button.destructive-action {
+  color: #fff6f2; background-color: #b0473a; border-color: #b0473a;
 }
-window.restlos-dark checkbutton check:checked,
-window.restlos-light checkbutton check:checked {
-  color: #0d171d;
-  background-color: #84dfc5;
-  border-color: #84dfc5;
+window.restlos-light button.destructive-action:disabled, window.restlos-dark button.destructive-action:disabled,
+window.restlos-light button.primary:disabled, window.restlos-dark button.primary:disabled {
+  color: #c9d3d7; background-color: #8fa2aa; border-color: #8fa2aa;
 }
-window.restlos-dark button:focus,
-window.restlos-dark entry:focus,
-window.restlos-dark dropdown > button:focus,
-window.restlos-light button:focus,
-window.restlos-light entry:focus,
-window.restlos-light dropdown > button:focus {
-  border-color: #55bda3;
-  box-shadow: 0 0 0 1px #55bda3;
+window.restlos-light .nav-sidebar button.nav, window.restlos-dark .nav-sidebar button.nav {
+  background-color: transparent; color: #c0d2d9; border-color: transparent;
+}
+window.restlos-light .nav-sidebar button.nav:hover, window.restlos-dark .nav-sidebar button.nav:hover { background-color: #1b3b48; }
+window.restlos-light .nav-sidebar button.nav.active, window.restlos-dark .nav-sidebar button.nav.active {
+  background-color: #244652; color: #9bf1dc;
+}
+window.restlos-light .side-bottom button, window.restlos-dark .side-bottom button {
+  background-color: transparent; color: #c8dce0; border-color: #34505a;
+}
+window.restlos-light .notice button, window.restlos-dark .notice button { background-color: transparent; color: #ffffff; border-color: #3d6670; }
+window.restlos-light .notice button.primary, window.restlos-dark .notice button.primary {
+  background-color: #6ce0c3; color: #103945; border-color: #6ce0c3;
+}
+window.restlos-light headerbar.restlos-header button, window.restlos-dark headerbar.restlos-header button {
+  background-color: transparent; color: #d9e8ec; border-color: transparent;
 }
 """
 
@@ -319,6 +251,7 @@ def _apply_appearance(widget: Gtk.Widget, dark: bool) -> None:
     widget.remove_css_class("restlos-light")
     widget.remove_css_class("restlos-dark")
     widget.add_css_class("restlos-dark" if dark else "restlos-light")
+    widget.add_css_class("dialog-surface")
 
 
 def _icon_widget(icon: str, size: int = 40) -> Gtk.Image:
@@ -329,6 +262,25 @@ def _icon_widget(icon: str, size: int = 40) -> Gtk.Image:
         image = Gtk.Image.new_from_icon_name(icon or "application-x-executable")
     image.set_pixel_size(size)
     return image
+
+
+def _label(text: str = "", *css: str, xalign: float = 0.0, wrap: bool = False, ellipsize: bool = False) -> Gtk.Label:
+    label = Gtk.Label(label=text, xalign=xalign)
+    for name in css:
+        label.add_css_class(name)
+    if wrap:
+        label.set_wrap(True)
+        label.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+    if ellipsize:
+        label.set_ellipsize(Pango.EllipsizeMode.END)
+    return label
+
+
+def _margins(widget: Gtk.Widget, top: int, end: int | None = None, bottom: int | None = None, start: int | None = None) -> None:
+    widget.set_margin_top(top)
+    widget.set_margin_end(top if end is None else end)
+    widget.set_margin_bottom(top if bottom is None else bottom)
+    widget.set_margin_start((top if end is None else end) if start is None else start)
 
 
 def _wrapping_check_button(label: str) -> Gtk.CheckButton:
@@ -346,6 +298,47 @@ def _wrapping_check_button(label: str) -> Gtk.CheckButton:
             break
         child = child.get_next_sibling()
     return check
+
+
+def refresh_desktop_icon(data_home: Path | None = None) -> bool:
+    """Neues Programmsymbol auch über In-App-Updates ausliefern.
+
+    Ersetzt nur Symbole, die bereits für Restlos angelegt wurden (install.sh legt ein Pixmap an)
+    oder ein veraltetes Systemsymbol per Benutzersymbol überdeckt. Gibt True zurück, wenn
+    sich etwas geändert hat.
+    """
+    try:
+        source = ICON_PATH.read_bytes()
+    except OSError:
+        return False
+    base = data_home or Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share")
+    name = f"{APP_ID}.svg"
+    user_icon = base / "icons/hicolor/scalable/apps" / name
+    system_icon = Path("/usr/share/icons/hicolor/scalable/apps") / name
+    targets: list[Path] = []
+    pixmap = base / "pixmaps" / name
+    if pixmap.is_file() and not pixmap.is_symlink():
+        targets.append(pixmap)
+    try:
+        system_outdated = system_icon.is_file() and system_icon.read_bytes() != source
+    except OSError:
+        system_outdated = False
+    if (user_icon.is_file() and not user_icon.is_symlink()) or system_outdated:
+        targets.append(user_icon)
+    changed = False
+    for target in targets:
+        try:
+            if target.is_file() and target.read_bytes() == source:
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_name(f".{target.name}.tmp")
+            temporary.write_bytes(source)
+            temporary.chmod(0o644)
+            temporary.replace(target)
+            changed = True
+        except OSError:
+            continue
+    return changed
 
 
 class ApplicationRow(Gtk.ListBoxRow):
@@ -488,11 +481,16 @@ class TargetRow(Gtk.ListBoxRow):
 
 
 class MainWindow(Gtk.ApplicationWindow):
+    PAGES = ("apps", "recovery", "updates")
+
     def __init__(self, application: Gtk.Application) -> None:
         super().__init__(application=application, title=APP_NAME)
-        self.set_default_size(1120, 760)
-        self.set_size_request(840, 560)
+        self.set_default_size(1240, 800)
+        self.set_size_request(900, 600)
+        self.set_icon_name(APP_ID)
         self.add_css_class("restlos-root")
+        self._settings = LanguageSettings()
+        self._appearance = self._settings.value("appearance", "system")
         self._gtk_settings = Gtk.Settings.get_default()
         self._desktop_settings: Gio.Settings | None = None
         self._desktop_has_color_scheme = False
@@ -519,15 +517,18 @@ class MainWindow(Gtk.ApplicationWindow):
         self.current_app: AppRecord | None = None
         self.current_plan: RemovalPlan | None = None
         self._legacy_folder_dialog: Gtk.FileChooserNative | None = None
-        self._recovery_dialog: Gtk.Dialog | None = None
+        self._recovery_loading = False
         self._locations_dialog: Gtk.Dialog | None = None
+        self._notice_timeout = 0
+        self._pending_selection: AppRecord | None = None
         self.busy = False
 
         self._build_header()
-        self._build_content()
+        self._build_shell()
         self._load_applications()
 
-    def _sync_theme(self, *_args) -> None:
+    # ----- Darstellung ---------------------------------------------------------------------
+    def _system_prefers_dark(self) -> bool:
         theme_name = ""
         prefer_dark = False
         if self._gtk_settings is not None:
@@ -542,44 +543,61 @@ class MainWindow(Gtk.ApplicationWindow):
             if self._desktop_has_gtk_theme:
                 desktop_theme = self._desktop_settings.get_string("gtk-theme")
         if environment_theme:
-            dark = "dark" in environment_theme.casefold()
+            return "dark" in environment_theme.casefold()
+        return (
+            prefer_dark
+            or "dark" in theme_name.casefold()
+            or "dark" in desktop_theme.casefold()
+            or desktop_scheme.casefold() == "prefer-dark"
+        )
+
+    def _sync_theme(self, *_args) -> None:
+        if self._appearance == "dark":
+            dark = True
+        elif self._appearance == "light":
+            dark = False
         else:
-            dark = (
-                prefer_dark
-                or "dark" in theme_name.casefold()
-                or "dark" in desktop_theme.casefold()
-                or desktop_scheme.casefold() == "prefer-dark"
-            )
+            dark = self._system_prefers_dark()
         self._dark_mode = dark
-        _apply_appearance(self, dark)
+        self.remove_css_class("restlos-light")
+        self.remove_css_class("restlos-dark")
+        self.add_css_class("restlos-dark" if dark else "restlos-light")
         application = self.get_application()
         windows = Gtk.Window.get_toplevels()
         for index in range(windows.get_n_items()):
             window = windows.get_item(index)
-            if isinstance(window, Gtk.Window) and (
-                window is self or (application is not None and window.get_application() is application)
+            if isinstance(window, Gtk.Window) and window is not self and (
+                application is not None and window.get_application() is application
             ):
                 _apply_appearance(window, dark)
+        if hasattr(self, "theme_button"):
+            self.theme_button.set_label(_("Hell / Dunkel"))
+
+    def _toggle_theme(self, _button: Gtk.Button) -> None:
+        self._appearance = "light" if self._dark_mode else "dark"
+        try:
+            self._settings.update(appearance=self._appearance)
+        except (OSError, ValueError):
+            pass
+        self._sync_theme()
+
+    def follow_system_theme(self) -> None:
+        self._appearance = "system"
+        try:
+            self._settings.update(appearance="system")
+        except (OSError, ValueError):
+            pass
+        self._sync_theme()
 
     def _style_dialog(self, dialog: Gtk.Widget) -> None:
         _apply_appearance(dialog, self._dark_mode)
 
+    # ----- Rahmen --------------------------------------------------------------------------
     def _build_header(self) -> None:
         header = Gtk.HeaderBar()
         header.add_css_class("restlos-header")
-
-        brand = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
-        brand.set_valign(Gtk.Align.CENTER)
-        name = Gtk.Label(label="RESTLOS  /  UNINSTALLER", xalign=0)
-        name.add_css_class("brand-name")
-        brand.append(name)
-        header.pack_start(brand)
-
-        tagline = Gtk.Label(label=APP_TAGLINE)
-        tagline.add_css_class("header-tagline")
-        tagline.set_ellipsize(Pango.EllipsizeMode.END)
-        tagline.set_tooltip_text(APP_TAGLINE)
-        header.set_title_widget(tagline)
+        title = _label(APP_NAME, "header-title", xalign=0.5)
+        header.set_title_widget(title)
 
         self.refresh_button = Gtk.Button.new_from_icon_name("view-refresh-symbolic")
         self.refresh_button.set_tooltip_text(_("Programmliste neu einlesen"))
@@ -587,10 +605,11 @@ class MainWindow(Gtk.ApplicationWindow):
         header.pack_end(self.refresh_button)
 
         menu = Gio.Menu()
-        menu.append(_("Wiederherstellungszentrum …"), "app.recovery")
+        menu.append(_("Ordner prüfen …"), "win.choose-folder")
         menu.append(_("Protokollordner öffnen"), "app.open-history")
         menu.append(_("Nach Updates suchen …"), "app.check-updates")
         menu.append(_("Automatisch nach Updates suchen"), "app.automatic-updates")
+        menu.append(_("Darstellung wie System"), "win.system-theme")
         language_menu = Gio.Menu()
         for label, language in (
             (_("Systemsprache"), "system"),
@@ -603,27 +622,221 @@ class MainWindow(Gtk.ApplicationWindow):
         menu.append_submenu(_("Sprache"), language_menu)
         menu.append(_("Über Restlos Uninstaller"), "app.about")
         menu_button = Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu)
+        menu_button.set_tooltip_text(_("Menü"))
         header.pack_end(menu_button)
         self.set_titlebar(header)
 
-    def _build_content(self) -> None:
+        for name, callback in (
+            ("choose-folder", lambda *_args: self._choose_folder(None)),
+            ("system-theme", lambda *_args: self.follow_system_theme()),
+        ):
+            action = Gio.SimpleAction.new(name, None)
+            action.connect("activate", callback)
+            self.add_action(action)
+
+    def _build_shell(self) -> None:
+        shell = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        self.set_child(shell)
+        shell.append(self._build_navigation())
+
+        overlay = Gtk.Overlay()
+        overlay.set_hexpand(True)
+        overlay.add_css_class("main-area")
+        shell.append(overlay)
+        self.page_stack = Gtk.Stack()
+        self.page_stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
+        self.page_stack.set_transition_duration(120)
+        self.page_stack.add_named(self._apps_page(), "apps")
+        self.page_stack.add_named(self._recovery_page(), "recovery")
+        self.page_stack.add_named(self._updates_page(), "updates")
+        overlay.set_child(self.page_stack)
+        overlay.add_overlay(self._build_notice())
+        self.navigate("apps")
+
+    def _build_navigation(self) -> Gtk.Widget:
+        sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        sidebar.add_css_class("nav-sidebar")
+        sidebar.set_size_request(238, -1)
+
+        brand = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=11)
+        mark = Gtk.Image.new_from_file(str(ICON_PATH)) if ICON_PATH.is_file() else Gtk.Image.new_from_icon_name(APP_ID)
+        mark.set_pixel_size(42)
+        brand.append(mark)
+        names = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        names.set_valign(Gtk.Align.CENTER)
+        names.append(_label("Restlos", "brand-name"))
+        names.append(_label("UNINSTALLER", "brand-sub"))
+        brand.append(names)
+        sidebar.append(brand)
+
+        sidebar.append(_label(_("ARBEITSPLATZ"), "side-title"))
+        self.nav_buttons: dict[str, Gtk.Button] = {}
+        self.nav_counts: dict[str, Gtk.Label] = {}
+        for page, symbol, text in (
+            ("apps", "▤", _("Programme entfernen")),
+            ("recovery", "↺", _("Wiederherstellung")),
+            ("updates", "↻", _("Updates & Startcheck")),
+        ):
+            button = Gtk.Button()
+            button.add_css_class("nav")
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+            row.append(_label(symbol))
+            text_label = _label(text, ellipsize=True)
+            text_label.set_hexpand(True)
+            row.append(text_label)
+            count = _label("", "nav-count", xalign=1)
+            row.append(count)
+            button.set_child(row)
+            button.connect("clicked", lambda _button, name=page: self.navigate(name))
+            sidebar.append(button)
+            self.nav_buttons[page] = button
+            self.nav_counts[page] = count
+
+        sidebar.append(_label(_("WERKZEUGE"), "side-title"))
+        for symbol, text, tooltip, callback in (
+            ("＋", _("Ordner prüfen …"), _("Einen nicht erkannten Programm- oder Spieleordner manuell analysieren"),
+             lambda _button: self._choose_folder(None)),
+            ("☰", _("Protokolle"), _("Protokollordner öffnen"),
+             lambda _button: self.get_application().activate_action("open-history", None)),
+        ):
+            button = Gtk.Button()
+            button.add_css_class("nav")
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+            row.append(_label(symbol))
+            row.append(_label(text, ellipsize=True))
+            button.set_child(row)
+            button.set_tooltip_text(tooltip)
+            button.connect("clicked", callback)
+            sidebar.append(button)
+
+        spacer = Gtk.Box()
+        spacer.set_vexpand(True)
+        sidebar.append(spacer)
+
+        bottom = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        bottom.add_css_class("side-bottom")
+        bottom.append(_label(_("● Lokal auf deinem Computer"), "local"))
+        bottom.append(_label(_("Kein Konto, keine Cloud. Löschplan vor jeder Entfernung."), wrap=True))
+        self.theme_button = Gtk.Button(label=_("Hell / Dunkel"))
+        self.theme_button.set_halign(Gtk.Align.START)
+        self.theme_button.set_tooltip_text(_("Zwischen heller und dunkler Darstellung wechseln"))
+        self.theme_button.connect("clicked", self._toggle_theme)
+        bottom.append(self.theme_button)
+        version = ".".join(__version__.split(".")[:2])
+        bottom.append(_label(_("Version {version} · Dein Deinstaller", version=version), "side-version"))
+        sidebar.append(bottom)
+        return sidebar
+
+    def navigate(self, page: str) -> None:
+        if page not in self.PAGES:
+            return
+        self.page_stack.set_visible_child_name(page)
+        for name, button in self.nav_buttons.items():
+            if name == page:
+                button.add_css_class("active")
+            else:
+                button.remove_css_class("active")
+        if page == "recovery":
+            self._load_recovery_records()
+        elif page == "updates":
+            application = self.get_application()
+            if isinstance(application, RestlosApplication):
+                self.show_update_status(application.update_status())
+
+    @staticmethod
+    def _page_scroll(content: Gtk.Widget) -> Gtk.ScrolledWindow:
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroll.set_vexpand(True)
+        scroll.set_child(content)
+        return scroll
+
+    @staticmethod
+    def _page_top(eyebrow: str, title: str, trailing: Gtk.Widget | None = None) -> Gtk.Widget:
+        top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
+        labels = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        labels.set_hexpand(True)
+        labels.append(_label(eyebrow, "eyebrow"))
+        labels.append(_label(title, "page-title", ellipsize=True))
+        top.append(labels)
+        if trailing is not None:
+            trailing.set_valign(Gtk.Align.END)
+            top.append(trailing)
+        return top
+
+    # ----- Hinweis unten rechts --------------------------------------------------------------
+    def _build_notice(self) -> Gtk.Widget:
+        self.notice = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        self.notice.add_css_class("notice")
+        self.notice.set_halign(Gtk.Align.END)
+        self.notice.set_valign(Gtk.Align.END)
+        _margins(self.notice, 0, 24, 24, 0)
+        self.notice.set_size_request(320, -1)
+        self.notice_label = _label("", wrap=True)
+        self.notice_label.set_max_width_chars(46)
+        self.notice.append(self.notice_label)
+        self.notice_actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.notice_actions.set_halign(Gtk.Align.END)
+        self.notice.append(self.notice_actions)
+        self.notice.set_visible(False)
+        return self.notice
+
+    def show_notice(
+        self,
+        text: str,
+        *,
+        action_label: str = "",
+        action: object = None,
+        seconds: int = 6,
+    ) -> None:
+        if self._notice_timeout:
+            GLib.source_remove(self._notice_timeout)
+            self._notice_timeout = 0
+        self.notice_label.set_text(text)
+        _clear_box(self.notice_actions)
+        if action_label and callable(action):
+            primary = Gtk.Button(label=action_label)
+            primary.add_css_class("primary")
+            primary.connect("clicked", lambda _button: (self.hide_notice(), action()))
+            self.notice_actions.append(primary)
+        close = Gtk.Button(label=_("Später") if action_label else _("OK"))
+        close.connect("clicked", lambda _button: self.hide_notice())
+        self.notice_actions.append(close)
+        self.notice.set_visible(True)
+        if seconds > 0:
+            self._notice_timeout = GLib.timeout_add_seconds(seconds, self._notice_expired)
+
+    def _notice_expired(self) -> bool:
+        self._notice_timeout = 0
+        self.hide_notice()
+        return False
+
+    def hide_notice(self) -> None:
+        if self._notice_timeout:
+            GLib.source_remove(self._notice_timeout)
+            self._notice_timeout = 0
+        self.notice.set_visible(False)
+
+    # ----- Seite: Programme --------------------------------------------------------------------
+    def _apps_page(self) -> Gtk.Widget:
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
+        _margins(page, 26, 30, 22, 30)
+        self.count_pill = _label(_("Wird eingelesen …"), "pill")
+        page.append(self._page_top(_("SICHER DEINSTALLIEREN"), _("Programme & Spiele"), self.count_pill))
+
         paned = Gtk.Paned.new(Gtk.Orientation.HORIZONTAL)
-        paned.set_position(370)
+        paned.set_vexpand(True)
+        paned.set_position(360)
+        paned.set_wide_handle(False)
         paned.set_shrink_start_child(False)
         paned.set_shrink_end_child(False)
-        self.set_child(paned)
+        page.append(paned)
 
-        sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        sidebar.add_css_class("sidebar")
-        sidebar.set_size_request(320, -1)
-        sidebar.set_margin_top(18)
-        sidebar.set_margin_bottom(16)
-        sidebar.set_margin_start(14)
-        sidebar.set_margin_end(14)
-
-        sidebar_heading = Gtk.Label(label=_("INSTALLIERTE APPS & SPIELE"), xalign=0)
-        sidebar_heading.add_css_class("sidebar-heading")
-        sidebar.append(sidebar_heading)
+        sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        sidebar.add_css_class("list-card")
+        sidebar.set_size_request(300, -1)
+        sidebar.set_margin_end(10)
+        sidebar.append(_label(_("INSTALLIERTE APPS & SPIELE"), "eyebrow"))
 
         self.search = Gtk.SearchEntry()
         # The property predates the setter method, which requires GTK 4.10.
@@ -631,26 +844,17 @@ class MainWindow(Gtk.ApplicationWindow):
         self.search.connect("search-changed", self._on_search_changed)
         sidebar.append(self.search)
 
-        filter_bar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         sources = [_("Alle Quellen"), *(display_text(source.value) for source in SourceKind)]
         self.source_filter = Gtk.DropDown.new_from_strings(sources)
         self.source_filter.set_hexpand(True)
         self.source_filter.set_tooltip_text(_("Nach Installationsquelle filtern"))
         self.source_filter.connect("notify::selected", lambda *_args: self.app_list.invalidate_filter())
-        filter_bar.append(self.source_filter)
-        folder_button = Gtk.Button(label=_("Ordner prüfen …"))
-        folder_button.set_hexpand(True)
-        folder_button.set_tooltip_text(_("Einen nicht erkannten Programm- oder Spieleordner manuell analysieren"))
-        folder_button.connect("clicked", self._choose_folder)
-        filter_bar.append(folder_button)
-        sidebar.append(filter_bar)
+        sidebar.append(self.source_filter)
 
         self.scan_status = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         self.scan_spinner = Gtk.Spinner()
-        self.scan_status_label = Gtk.Label(label=_("Programme werden eingelesen …"), xalign=0)
+        self.scan_status_label = _label(_("Programme werden eingelesen …"), "muted", ellipsize=True)
         self.scan_status_label.set_hexpand(True)
-        self.scan_status_label.set_ellipsize(Pango.EllipsizeMode.END)
-        self.scan_status_label.add_css_class("muted")
         self.scan_status.append(self.scan_spinner)
         self.scan_status.append(self.scan_status_label)
         self.scan_status.add_css_class("scan-card")
@@ -664,9 +868,8 @@ class MainWindow(Gtk.ApplicationWindow):
         self.app_list.set_selection_mode(Gtk.SelectionMode.SINGLE)
         self.app_list.set_filter_func(self._filter_application)
         self.app_list.connect("row-selected", self._on_app_selected)
-        placeholder = Gtk.Label(label=_("Keine passenden Programme gefunden"))
+        placeholder = _label(_("Keine passenden Programme gefunden"), "muted", xalign=0.5)
         placeholder.set_margin_top(28)
-        placeholder.add_css_class("muted")
         self.app_list.set_placeholder(placeholder)
         scroll.set_child(self.app_list)
         sidebar.append(scroll)
@@ -674,31 +877,52 @@ class MainWindow(Gtk.ApplicationWindow):
 
         self.detail_stack = Gtk.Stack()
         self.detail_stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
+        self.detail_stack.set_margin_start(10)
         self.detail_stack.add_named(self._empty_page(), "empty")
         self.detail_stack.add_named(self._detail_page(), "detail")
         self.detail_stack.add_named(self._progress_page(), "progress")
         self.detail_stack.set_visible_child_name("empty")
         paned.set_end_child(self.detail_stack)
+        return page
 
     def _empty_page(self) -> Gtk.Widget:
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        box.set_halign(Gtk.Align.CENTER)
-        box.set_valign(Gtk.Align.CENTER)
-        image = Gtk.Image.new_from_icon_name("edit-delete-symbolic")
-        image.set_pixel_size(72)
-        image.add_css_class("muted")
-        box.append(image)
-        title = Gtk.Label(label=_("Programm auswählen"))
-        title.add_css_class("empty-title")
-        box.append(title)
-        note = Gtk.Label(label=_("Restlos erstellt zuerst einen überprüfbaren Löschplan."))
-        note.set_wrap(True)
-        note.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
-        note.set_max_width_chars(45)
-        note.set_justify(Gtk.Justification.CENTER)
-        note.add_css_class("muted")
-        box.append(note)
-        return box
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        hero = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=24)
+        hero.add_css_class("hero")
+        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        text.set_hexpand(True)
+        text.append(_label(_("Programm auswählen"), "hero-title", wrap=True))
+        text.append(_label(
+            _("Restlos erstellt zuerst einen überprüfbaren Löschplan. Erst nach deiner Bestätigung wird entfernt – "
+              "Benutzerdaten landen standardmäßig im Papierkorb."),
+            "hero-text", wrap=True,
+        ))
+        hero.append(text)
+        numbers = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        numbers.set_valign(Gtk.Align.CENTER)
+        self.hero_count = _label("—", "hero-number", xalign=1)
+        numbers.append(self.hero_count)
+        numbers.append(_label(_("Anwendungen erkannt"), "hero-number-label", xalign=1))
+        hero.append(numbers)
+        box.append(hero)
+
+        grid = Gtk.Grid(column_spacing=14, row_spacing=14)
+        grid.set_column_homogeneous(True)
+        for column, (symbol, title, text_value) in enumerate((
+            ("▤", _("Löschplan"), _("Paketaktionen, Programmordner und Restdaten – jeder Pfad mit Begründung und Größe.")),
+            ("↺", _("Papierkorb"), _("Benutzerdaten bleiben wiederherstellbar, bis du den Papierkorb leerst.")),
+            ("◆", _("Safety Backup"), _("Vor endgültigem Löschen werden Einstellungen und Spielstände gesichert.")),
+        )):
+            card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+            card.add_css_class("info-card")
+            icon = _label(symbol, "info-icon", xalign=0.5)
+            icon.set_halign(Gtk.Align.START)
+            card.append(icon)
+            card.append(_label(title, "section-title", wrap=True))
+            card.append(_label(text_value, "muted", wrap=True))
+            grid.attach(card, column, 0, 1, 1)
+        box.append(grid)
+        return self._page_scroll(box)
 
     def _detail_page(self) -> Gtk.Widget:
         page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -708,10 +932,8 @@ class MainWindow(Gtk.ApplicationWindow):
         page.append(page_scroll)
 
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
-        outer.set_margin_top(28)
         outer.set_margin_bottom(18)
-        outer.set_margin_start(28)
-        outer.set_margin_end(28)
+        outer.set_margin_end(4)
         page_scroll.set_child(outer)
 
         eyebrow = Gtk.Label(label=_("AUSGEWÄHLTE ANWENDUNG"), xalign=0)
@@ -719,7 +941,7 @@ class MainWindow(Gtk.ApplicationWindow):
         outer.append(eyebrow)
 
         hero = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=15)
-        hero.add_css_class("hero-card")
+        hero.add_css_class("detail-hero")
         self.detail_icon_box = Gtk.Box()
         hero.append(self.detail_icon_box)
         labels = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
@@ -820,9 +1042,7 @@ class MainWindow(Gtk.ApplicationWindow):
 
         bottom = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         bottom.add_css_class("action-bar")
-        bottom.set_margin_start(28)
-        bottom.set_margin_end(28)
-        bottom.set_margin_bottom(14)
+        bottom.set_margin_end(4)
         self.delete_note = Gtk.Label(label=_("Vor dem Löschen erscheint eine letzte Zusammenfassung."), xalign=0)
         self.delete_note.set_hexpand(True)
         self.delete_note.set_wrap(True)
@@ -830,6 +1050,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.delete_note.add_css_class("muted")
         bottom.append(self.delete_note)
         self.remove_button = Gtk.Button(label=_("Restlos entfernen"))
+        self.remove_button.set_valign(Gtk.Align.CENTER)
         self.remove_button.add_css_class("destructive-action")
         self.remove_button.connect("clicked", self._confirm_removal)
         bottom.append(self.remove_button)
@@ -878,7 +1099,9 @@ class MainWindow(Gtk.ApplicationWindow):
             return
         self.busy = True
         self.refresh_button.set_sensitive(False)
+        self.scan_status.set_visible(True)
         self.scan_spinner.start()
+        self.count_pill.set_text(_("Wird eingelesen …"))
         self.scan_status_label.set_text(_("Pakete, Spielebibliotheken, Wine und portable Ordner werden eingelesen …"))
 
         def worker() -> None:
@@ -898,12 +1121,21 @@ class MainWindow(Gtk.ApplicationWindow):
             self.scan_status_label.set_text(_("Einlesen fehlgeschlagen: {error}", error=error))
             return False
         self.apps = apps
+        self._pending_selection = None
         _clear_box(self.app_list)
         for app in apps:
             self.app_list.append(ApplicationRow(app))
         self.scan_status_label.set_text(_("{count} Anwendungen erkannt", count=len(apps)))
+        self.scan_status.set_visible(False)
+        self._show_app_count()
         self.app_list.invalidate_filter()
         return False
+
+    def _show_app_count(self) -> None:
+        count = len(self.apps)
+        self.count_pill.set_text(_("{count} Anwendungen erkannt", count=count))
+        self.hero_count.set_text(str(count))
+        self.nav_counts["apps"].set_text(str(count))
 
     def _filter_application(self, row: Gtk.ListBoxRow) -> bool:
         if not isinstance(row, ApplicationRow):
@@ -979,12 +1211,14 @@ class MainWindow(Gtk.ApplicationWindow):
                 "install_root": str(path),
             },
         )
+        self.navigate("apps")
         existing = next((item for item in self.apps if item.key == app.key), None)
         if existing is not None:
             app = existing
         else:
             self.apps.append(app)
             self.app_list.append(ApplicationRow(app))
+            self._show_app_count()
             self.scan_status_label.set_text(
                 _("{count} Anwendungen erkannt · manueller Ordner hinzugefügt", count=len(self.apps))
             )
@@ -999,8 +1233,15 @@ class MainWindow(Gtk.ApplicationWindow):
             child = child.get_next_sibling()
 
     def _on_app_selected(self, _listbox: Gtk.ListBox, row: Gtk.ListBoxRow | None) -> None:
-        if not isinstance(row, ApplicationRow) or self.busy:
+        if not isinstance(row, ApplicationRow):
             return
+        if self.busy:
+            # Markierung und Löschplan dürfen nie auseinanderlaufen: die Auswahl wird nach der
+            # laufenden Aktion übernommen, bis dahin ist „Entfernen“ gesperrt.
+            self._pending_selection = row.record
+            self.remove_button.set_sensitive(False)
+            return
+        self._pending_selection = None
         self.current_app = row.record
         self._show_app_header(row.record)
         self._analyze_current()
@@ -1044,10 +1285,22 @@ class MainWindow(Gtk.ApplicationWindow):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _take_pending_selection(self) -> bool:
+        """Eine während der Analyse angeklickte Anwendung jetzt analysieren."""
+        pending, self._pending_selection = self._pending_selection, None
+        if pending is None or self.busy or (self.current_app is not None and pending.key == self.current_app.key):
+            return False
+        self.current_app = pending
+        self._show_app_header(pending)
+        self._analyze_current()
+        return True
+
     def _analysis_loaded(self, plan: RemovalPlan | None, error: str | None) -> bool:
         self.busy = False
         self.analyze_button.set_sensitive(True)
         self.locations_button.set_sensitive(True)
+        if self._take_pending_selection():
+            return False
         if error or plan is None:
             self.plan_summary.set_text(
                 _("Analyse fehlgeschlagen: {error}", error=error or _("unbekannter Fehler"))
@@ -1440,82 +1693,59 @@ class MainWindow(Gtk.ApplicationWindow):
         if response == Gtk.ResponseType.HELP:
             self.show_recovery_center()
 
-    def show_recovery_center(self) -> None:
-        if self._recovery_dialog is not None:
-            self._recovery_dialog.present()
-            return
-        dialog = Gtk.Dialog(
-            transient_for=self,
-            modal=True,
-            title=_("Restlos-Wiederherstellungszentrum"),
-        )
-        self._style_dialog(dialog)
-        dialog.set_default_size(760, 520)
-        dialog.add_button(_("Schließen"), Gtk.ResponseType.CLOSE)
-        dialog.connect("response", self._close_recovery_center)
-        content = dialog.get_content_area()
-        content.set_spacing(14)
-        content.set_margin_top(20)
-        content.set_margin_bottom(16)
-        content.set_margin_start(20)
-        content.set_margin_end(20)
-
-        title = Gtk.Label(label=_("Wiederherstellbare Benutzerdaten und Safety Backups"), xalign=0)
-        title.set_ellipsize(Pango.EllipsizeMode.END)
-        title.set_tooltip_text(_("Wiederherstellbare Benutzerdaten und Safety Backups"))
-        title.add_css_class("hero-title")
-        content.append(title)
-        note = Gtk.Label(
-            label=_(
+    # ----- Seite: Wiederherstellung --------------------------------------------------------------
+    def _recovery_page(self) -> Gtk.Widget:
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
+        _margins(page, 26, 30, 22, 30)
+        reload_button = Gtk.Button(label=_("Neu prüfen"))
+        reload_button.connect("clicked", lambda _button: self._load_recovery_records(force=True))
+        page.append(self._page_top(_("WIEDERHERSTELLUNG"), _("Daten zurückholen"), reload_button))
+        note = _label(
+            _(
                 "Hier kannst du Papierkorbdaten und Safety Backups an ihren ursprünglichen Ort zurückholen. "
                 "Paket-Deinstallationen und Änderungen an Spielebibliotheken werden dabei nicht rückgängig gemacht."
             ),
-            xalign=0,
+            "muted", wrap=True,
         )
-        note.set_wrap(True)
-        note.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
-        note.add_css_class("muted")
-        content.append(note)
+        page.append(note)
+        self.recovery_list = Gtk.ListBox()
+        self.recovery_list.set_selection_mode(Gtk.SelectionMode.NONE)
+        self.recovery_list.add_css_class("card")
+        self.recovery_list.set_valign(Gtk.Align.START)
+        scroll = self._page_scroll(self.recovery_list)
+        page.append(scroll)
+        return page
 
-        scroll = Gtk.ScrolledWindow()
-        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        scroll.set_vexpand(True)
-        record_list = Gtk.ListBox()
-        record_list.set_selection_mode(Gtk.SelectionMode.NONE)
-        record_list.add_css_class("card")
+    def show_recovery_center(self) -> None:
+        self.navigate("recovery")
+
+    def _load_recovery_records(self, *, force: bool = False) -> None:
+        if self._recovery_loading and not force:
+            return
+        self._recovery_loading = True
+        _clear_box(self.recovery_list)
         loading = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         loading.set_halign(Gtk.Align.CENTER)
-        loading.set_margin_top(36)
-        loading.set_margin_bottom(36)
+        _margins(loading, 36, 12)
         spinner = Gtk.Spinner()
         spinner.start()
         loading.append(spinner)
-        loading.append(Gtk.Label(label=_("Papierkorb, Safety Backups und Restlos-Protokolle werden geprüft …")))
-        record_list.append(loading)
-        scroll.set_child(record_list)
-        content.append(scroll)
-        self._recovery_dialog = dialog
-        dialog.present()
+        loading.append(_label(_("Papierkorb, Safety Backups und Restlos-Protokolle werden geprüft …"), wrap=True))
+        self.recovery_list.append(loading)
 
         def worker() -> None:
             try:
                 records = RecoveryManager().list_records()
-                GLib.idle_add(self._recovery_records_loaded, dialog, record_list, records, None)
+                GLib.idle_add(self._recovery_records_loaded, records, None)
             except Exception as error:  # defensive boundary for the GUI worker
-                GLib.idle_add(self._recovery_records_loaded, dialog, record_list, [], str(error))
+                GLib.idle_add(self._recovery_records_loaded, [], str(error))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _recovery_records_loaded(
-        self,
-        dialog: Gtk.Dialog,
-        record_list: Gtk.ListBox,
-        records: list[RecoveryRecord],
-        error: str | None,
-    ) -> bool:
-        if self._recovery_dialog is not dialog:
-            return False
-        _clear_box(record_list)
+    def _recovery_records_loaded(self, records: list[RecoveryRecord], error: str | None) -> bool:
+        self._recovery_loading = False
+        _clear_box(self.recovery_list)
+        self.nav_counts["recovery"].set_text(str(len(records)) if records else "")
         if error:
             empty_text = _("Wiederherstellungsdaten konnten nicht gelesen werden: {error}", error=error)
         elif not records:
@@ -1523,87 +1753,58 @@ class MainWindow(Gtk.ApplicationWindow):
         else:
             empty_text = ""
             for record in records:
-                record_list.append(self._recovery_row(record, dialog))
+                self.recovery_list.append(self._recovery_row(record))
         if empty_text:
-            empty = Gtk.Label(label=empty_text)
-            empty.set_wrap(True)
-            empty.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
-            empty.set_margin_top(36)
-            empty.set_margin_bottom(36)
-            empty.set_margin_start(12)
-            empty.set_margin_end(12)
-            empty.add_css_class("muted")
-            record_list.append(empty)
+            empty = _label(empty_text, "muted", xalign=0.5, wrap=True)
+            _margins(empty, 36, 12)
+            self.recovery_list.append(empty)
         return False
 
-    def _recovery_row(self, record: RecoveryRecord, parent: Gtk.Dialog) -> Gtk.ListBoxRow:
+    def _recovery_row(self, record: RecoveryRecord) -> Gtk.ListBoxRow:
         row = Gtk.ListBoxRow()
         row.set_selectable(False)
         row.add_css_class("target-row")
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=14)
-        box.set_margin_top(10)
-        box.set_margin_bottom(10)
-        box.set_margin_start(8)
-        box.set_margin_end(8)
+        _margins(box, 10, 8)
 
-        icon = Gtk.Image.new_from_icon_name("edit-undo-symbolic")
-        icon.set_pixel_size(34)
+        icon = _label("↺", "info-icon", xalign=0.5)
+        icon.set_valign(Gtk.Align.CENTER)
         box.append(icon)
         labels = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
         labels.set_hexpand(True)
-        name = Gtk.Label(label=record.app_name, xalign=0)
-        name.set_ellipsize(Pango.EllipsizeMode.END)
+        name = _label(record.app_name, "app-name", ellipsize=True)
         name.set_tooltip_text(record.app_name)
-        name.add_css_class("app-name")
         labels.append(name)
         timestamp = record.timestamp.replace("T", " ").replace("Z", " UTC")
-        details = Gtk.Label(
-            label=(
-                _(
-                    "{timestamp} · {count} Pfad(e) · {size} · {source}",
-                    timestamp=timestamp,
-                    count=len(record.available_items),
-                    size=format_size(record.available_size),
-                    source=display_text(record.source),
-                )
+        details = _label(
+            _(
+                "{timestamp} · {count} Pfad(e) · {size} · {source}",
+                timestamp=timestamp,
+                count=len(record.available_items),
+                size=format_size(record.available_size),
+                source=display_text(record.source),
             ),
-            xalign=0,
+            "muted", ellipsize=True,
         )
-        details.set_ellipsize(Pango.EllipsizeMode.END)
         details.set_tooltip_text(details.get_text())
-        details.add_css_class("muted")
         labels.append(details)
         if record.actions:
-            action_note = Gtk.Label(
-                label=_("Paket- oder Bibliotheksaktionen müssen bei Bedarf separat rückgängig gemacht werden."),
-                xalign=0,
-            )
-            action_note.set_wrap(True)
-            action_note.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
-            action_note.add_css_class("muted")
-            labels.append(action_note)
+            labels.append(_label(
+                _("Paket- oder Bibliotheksaktionen müssen bei Bedarf separat rückgängig gemacht werden."),
+                "muted", wrap=True,
+            ))
         box.append(labels)
         restore = Gtk.Button(label=_("Wiederherstellen"))
         restore.set_valign(Gtk.Align.CENTER)
-        restore.add_css_class("suggested-action")
-        restore.connect("clicked", self._confirm_restore, record, parent)
+        restore.add_css_class("primary")
+        restore.connect("clicked", self._confirm_restore, record)
         box.append(restore)
         row.set_child(box)
         return row
 
-    def _close_recovery_center(self, dialog: Gtk.Dialog, _response: int) -> None:
-        dialog.destroy()
-        if self._recovery_dialog is dialog:
-            self._recovery_dialog = None
-
-    def _confirm_restore(
-        self,
-        _button: Gtk.Button,
-        record: RecoveryRecord,
-        center: Gtk.Dialog,
-    ) -> None:
+    def _confirm_restore(self, _button: Gtk.Button, record: RecoveryRecord) -> None:
         dialog = Gtk.MessageDialog(
-            transient_for=center,
+            transient_for=self,
             modal=True,
             message_type=Gtk.MessageType.QUESTION,
             buttons=Gtk.ButtonsType.NONE,
@@ -1620,42 +1821,25 @@ class MainWindow(Gtk.ApplicationWindow):
         confirm = dialog.add_button(_("Wiederherstellen"), Gtk.ResponseType.ACCEPT)
         confirm.add_css_class("suggested-action")
         dialog.set_default_response(Gtk.ResponseType.ACCEPT)
-        dialog.connect("response", self._on_restore_confirmed, record.recovery_id, center)
+        dialog.connect("response", self._on_restore_confirmed, record.recovery_id)
         dialog.present()
 
-    def _on_restore_confirmed(
-        self,
-        dialog: Gtk.MessageDialog,
-        response: int,
-        recovery_id: str,
-        center: Gtk.Dialog,
-    ) -> None:
+    def _on_restore_confirmed(self, dialog: Gtk.MessageDialog, response: int, recovery_id: str) -> None:
         dialog.destroy()
         if response != Gtk.ResponseType.ACCEPT:
             return
-        self._close_recovery_center(center, Gtk.ResponseType.CLOSE)
-        progress = Gtk.Dialog(
-            transient_for=self,
-            modal=True,
-            title=_("Daten wiederherstellen"),
-        )
+        progress = Gtk.Dialog(transient_for=self, modal=True, title=_("Daten wiederherstellen"))
         self._style_dialog(progress)
         progress.set_deletable(False)
         area = progress.get_content_area()
         area.set_spacing(14)
-        area.set_margin_top(24)
-        area.set_margin_bottom(24)
-        area.set_margin_start(28)
-        area.set_margin_end(28)
+        _margins(area, 24, 28)
         spinner = Gtk.Spinner()
         spinner.set_size_request(42, 42)
         spinner.set_halign(Gtk.Align.CENTER)
         spinner.start()
         area.append(spinner)
-        status = Gtk.Label(label=_("Daten werden an ihre ursprünglichen Orte zurückgeholt …"))
-        status.set_wrap(True)
-        status.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
-        area.append(status)
+        area.append(_label(_("Daten werden an ihre ursprünglichen Orte zurückgeholt …"), wrap=True))
         progress.present()
 
         def worker() -> None:
@@ -1668,21 +1852,16 @@ class MainWindow(Gtk.ApplicationWindow):
         progress.destroy()
         if result.success:
             title = _("Wiederherstellung abgeschlossen")
-            details = (
-                _(
-                    "{count} Pfad(e) wurden zurückgeholt. Falls das Programmpaket entfernt wurde, muss es separat "
-                    "neu installiert werden.",
-                    count=len(result.restored_paths),
-                )
+            details = _(
+                "{count} Pfad(e) wurden zurückgeholt. Falls das Programmpaket entfernt wurde, muss es separat "
+                "neu installiert werden.",
+                count=len(result.restored_paths),
             )
             message_type = Gtk.MessageType.INFO
         else:
             title = _("Wiederherstellung nicht vollständig")
             restored = (
-                _(
-                    "{count} Pfad(e) wurden bereits wiederhergestellt.\n\n",
-                    count=len(result.restored_paths),
-                )
+                _("{count} Pfad(e) wurden bereits wiederhergestellt.\n\n", count=len(result.restored_paths))
                 if result.restored_paths
                 else ""
             )
@@ -1702,45 +1881,264 @@ class MainWindow(Gtk.ApplicationWindow):
         self._style_dialog(dialog)
         dialog.connect("response", lambda item, _response: item.destroy())
         dialog.present()
+        self._load_recovery_records(force=True)
         if not self.busy:
             self._load_applications()
         return False
+
+    # ----- Seite: Updates & Startcheck ---------------------------------------------------------
+    def _updates_page(self) -> Gtk.Widget:
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
+        _margins(content, 26, 30, 22, 30)
+        content.append(self._page_top(_("PROGRAMMUPDATES"), _("Updates & Startcheck")))
+
+        hero = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=24)
+        hero.add_css_class("hero")
+        hero_text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        hero_text.set_hexpand(True)
+        hero_text.append(_label(_("RESTLOS BLEIBT BEI DIR"), "eyebrow", "hero-eyebrow"))
+        hero_text.append(_label(_("Neue Funktionen. Deine Daten bleiben lokal."), "hero-title", wrap=True))
+        hero_text.append(_label(
+            _("GitHub liefert ausschließlich Programmupdates. Löschprotokolle, Wiederherstellungsdaten "
+              "und Einstellungen werden nicht hochgeladen."),
+            "hero-text", wrap=True,
+        ))
+        hero.append(hero_text)
+        hero_numbers = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        hero_numbers.set_valign(Gtk.Align.CENTER)
+        self.update_hero_version = _label(__version__, "hero-number", "hero-version", xalign=1)
+        hero_numbers.append(self.update_hero_version)
+        hero_numbers.append(_label(_("Aktive Version"), "hero-number-label", xalign=1))
+        hero.append(hero_numbers)
+        content.append(hero)
+
+        grid = Gtk.Grid(column_spacing=18, row_spacing=18)
+        grid.set_column_homogeneous(True)
+        content.append(grid)
+
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        card.add_css_class("card")
+        card.append(_label(_("Programmupdates"), "section-title"))
+        self.update_version_label = _label("", "muted", wrap=True)
+        card.append(self.update_version_label)
+        self.update_status_line = _label("", "status-line", wrap=True)
+        card.append(self.update_status_line)
+        buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.update_restart_button = Gtk.Button(label=_("Jetzt neu starten und aktualisieren"))
+        self.update_restart_button.add_css_class("primary")
+        self.update_restart_button.connect("clicked", lambda _button: self._application_call("restart_for_update"))
+        buttons.append(self.update_restart_button)
+        self.update_check_button = Gtk.Button(label=_("Jetzt prüfen"))
+        self.update_check_button.connect("clicked", lambda _button: self._application_call("check_updates_now"))
+        buttons.append(self.update_check_button)
+        card.append(buttons)
+        self.update_automatic = _wrapping_check_button(_("Automatisch stündlich prüfen und im Hintergrund vorbereiten"))
+        self.update_automatic.connect("toggled", self._automatic_toggled)
+        card.append(self.update_automatic)
+        self.update_rollback_button = Gtk.Button(label=_("Zur vorherigen Version zurückschalten"))
+        self.update_rollback_button.set_halign(Gtk.Align.START)
+        self.update_rollback_button.connect("clicked", lambda _button: self._application_call("rollback_update"))
+        card.append(self.update_rollback_button)
+        grid.attach(card, 0, 0, 1, 1)
+
+        how = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        how.add_css_class("card")
+        how.append(_label(_("So funktioniert das Update"), "section-title"))
+        for line in (
+            _("Restlos prüft stündlich das neueste GitHub-Release und lädt es im Hintergrund."),
+            _("Jedes Update ist mit Ed25519 signiert; Prüfsumme und Größe werden kontrolliert."),
+            _("Die neue Version liegt nur in deinem Benutzerordner – kein Passwort, kein Systemeingriff."),
+            _("Startet eine neue Version nicht, schaltet Restlos automatisch zurück."),
+            _("Protokolle, Wiederherstellungsdaten und Einstellungen bleiben unverändert."),
+        ):
+            how.append(_label("✓  " + line, wrap=True))
+        repository_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.update_repository = Gtk.Entry()
+        self.update_repository.set_hexpand(True)
+        self.update_repository.set_tooltip_text(_("GitHub-Benutzer/Repository der Updatequelle"))
+        repository_row.append(self.update_repository)
+        save = Gtk.Button(label=_("Speichern"))
+        save.connect("clicked", self._repository_saved)
+        repository_row.append(save)
+        how.append(_label(_("UPDATEQUELLE"), "stat-heading"))
+        how.append(repository_row)
+        grid.attach(how, 1, 0, 1, 1)
+
+        check = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        check.add_css_class("card")
+        check.append(_label(_("Startcheck"), "section-title"))
+        check.append(_label(_("Was Restlos auf diesem Computer vorfindet:"), "muted", wrap=True))
+        self.startcheck_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        check.append(self.startcheck_box)
+        content.append(check)
+        self._fill_startcheck()
+        return self._page_scroll(content)
+
+    def _application_call(self, name: str) -> None:
+        application = self.get_application()
+        method = getattr(application, name, None)
+        if callable(method):
+            method()
+
+    def _automatic_toggled(self, check: Gtk.CheckButton) -> None:
+        if getattr(self, "_updating_status", False):
+            return
+        application = self.get_application()
+        if isinstance(application, RestlosApplication):
+            application.set_automatic_updates(check.get_active())
+
+    def _repository_saved(self, _button: Gtk.Button) -> None:
+        application = self.get_application()
+        if isinstance(application, RestlosApplication):
+            application.save_update_repository(self.update_repository.get_text())
+
+    def show_update_status(self, status: UpdateStatus | None, *, checking: bool = False) -> None:
+        if status is None:
+            return
+        self._updating_status = True
+        try:
+            self.update_version_label.set_text(_("Installiert: Version {version}", version=status.running))
+            self.update_hero_version.set_text(status.running)
+            for name in ("good", "warn", "bad"):
+                self.update_status_line.remove_css_class(name)
+            if checking:
+                text, tone = _("Updates werden geprüft und gegebenenfalls im Hintergrund vorbereitet …"), "warn"
+            else:
+                text, tone = describe_update_status(status)
+            self.update_status_line.set_text(text)
+            self.update_status_line.add_css_class(tone)
+            self.update_restart_button.set_visible(status.restart_ready)
+            self.update_check_button.set_sensitive(not checking)
+            self.update_automatic.set_active(status.automatic)
+            application = self.get_application()
+            running_staged = bool(getattr(application, "running_staged", False))
+            self.update_rollback_button.set_visible(bool(status.pending) or running_staged)
+            if not self.update_repository.has_focus():
+                self.update_repository.set_text(status.repository)
+            self.nav_counts["updates"].set_text("1" if status.restart_ready else "")
+        finally:
+            self._updating_status = False
+
+    def _fill_startcheck(self) -> None:
+        _clear_box(self.startcheck_box)
+        gtk_version = f"{Gtk.get_major_version()}.{Gtk.get_minor_version()}.{Gtk.get_micro_version()}"
+        python_version = ".".join(str(part) for part in sys.version_info[:3])
+        managers = [name for name in ("apt-get", "dnf", "pacman", "zypper", "flatpak", "snap") if shutil.which(name)]
+        entries = (
+            (True, _("GTK {gtk} · Python {python}", gtk=gtk_version, python=python_version)),
+            (shutil.which("pkexec") is not None,
+             _("Administratorrechte über PolicyKit (pkexec) verfügbar") if shutil.which("pkexec")
+             else _("pkexec fehlt – Systempakete können nicht entfernt werden")),
+            (shutil.which("openssl") is not None,
+             _("OpenSSL für signierte Updates vorhanden") if shutil.which("openssl")
+             else _("OpenSSL fehlt – Updates können nicht geprüft werden")),
+            (bool(managers),
+             _("Paketquellen: {names}", names=", ".join(managers)) if managers
+             else _("Keine bekannte Paketverwaltung gefunden")),
+        )
+        for ok, text in entries:
+            line = _label(("✓  " if ok else "!  ") + text, "status-line", "good" if ok else "warn", wrap=True)
+            self.startcheck_box.append(line)
+
+
+def describe_update_status(status: UpdateStatus) -> tuple[str, str]:
+    """Statustext und Tonalität (good/warn/bad) für die Update-Seite."""
+    checked = ""
+    if status.checked is not None:
+        checked = " · " + _("geprüft {time}", time=time.strftime("%d.%m.%Y %H:%M", time.localtime(status.checked)))
+    if status.restart_ready:
+        return _("Version {version} ist geprüft und bereit. Sie startet beim nächsten Öffnen – oder sofort per Neustart.",
+                 version=status.pending) + checked, "good"
+    match status.kind:
+        case "current":
+            return _("Restlos ist auf dem aktuellen Stand.") + checked, "good"
+        case "ready":
+            return _("Restlos ist auf dem aktuellen Stand.") + checked, "good"
+        case "blocked":
+            return _("Version {version} wird übersprungen, weil sie nicht starten konnte. Die nächste Version kommt "
+                     "wieder automatisch.", version=status.version) + checked, "warn"
+        case "rolled-back":
+            return _("Zur vorherigen Version zurückgeschaltet. Version {version} wird übersprungen.",
+                     version=status.version) + checked, "warn"
+        case "error":
+            return display_text(status.detail or _("Ein unbekannter Fehler ist aufgetreten.")) + checked, "bad"
+    if not status.automatic:
+        return _("Automatische Updates sind ausgeschaltet."), "warn"
+    return _("Noch nicht geprüft. Die erste Prüfung startet kurz nach dem Öffnen."), "warn"
 
 
 class RestlosApplication(Gtk.Application):
     def __init__(self) -> None:
         # DEFAULT_FLAGS was only named in GLib 2.74; zero also supports 2.72.
         super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags(0))
-        self.update_state = UpdateState()
+        self.updater = Updater()
+        self.running_staged = self.updater.root != self.updater.base
+        self.restart_requested = False
         self._update_check_running = False
-        self._update_install_running = False
-        self._update_progress_dialog: Gtk.Dialog | None = None
-        self._update_progress_label: Gtk.Label | None = None
-        self._update_progress_bar: Gtk.ProgressBar | None = None
+        self._update_timer = 0
+        self._announced_version = ""
         self.connect("activate", self._activate)
         self._add_actions()
 
     def _activate(self, _application: Gtk.Application) -> None:
         window = self.props.active_window
+        first_start = window is None
         if window is None:
             window = MainWindow(self)
         window.present()
-        self._start_update_check(automatic=True)
+        if not first_start:
+            return
+        # Fenster steht: erfolgreichen Start einer vorbereiteten Version bestätigen.
+        GLib.idle_add(self._confirm_started)
+        if self._update_timer == 0:
+            self._update_timer = GLib.timeout_add_seconds(CHECK_INTERVAL_SECONDS, self._periodic_check)
+            if self.updater.config()["automatic"]:
+                GLib.timeout_add_seconds(FIRST_CHECK_DELAY_SECONDS, self._first_check)
+
+    def _confirm_started(self) -> bool:
+        try:
+            self.updater.startup_ready()
+        except (OSError, UpdateError):
+            pass
+        refresh_desktop_icon()
+        status = self.update_status()
+        window = self._main_window()
+        if window is not None and status is not None:
+            window.show_update_status(status)
+            if status.kind == "rolled-back":
+                window.show_notice(
+                    _("Das letzte Update konnte nicht starten. Restlos verwendet wieder die vorherige Version."),
+                    seconds=12,
+                )
+            elif status.restart_ready:
+                self._announce(status)
+        return False
+
+    def _first_check(self) -> bool:
+        self.check_updates_now(automatic=True)
+        return False
+
+    def _periodic_check(self) -> bool:
+        if self.updater.config()["automatic"]:
+            self.check_updates_now(automatic=True)
+        return True
+
+    def _main_window(self) -> MainWindow | None:
+        for window in self.get_windows():
+            if isinstance(window, MainWindow):
+                return window
+        return None
 
     def _style_dialog(self, dialog: Gtk.Widget) -> None:
-        parent = dialog.get_transient_for() if isinstance(dialog, Gtk.Window) else None
-        while isinstance(parent, Gtk.Window) and not isinstance(parent, MainWindow):
-            parent = parent.get_transient_for()
-        main = parent if isinstance(parent, MainWindow) else self.props.active_window
-        dark = isinstance(main, Gtk.Widget) and main.has_css_class("restlos-dark")
-        _apply_appearance(dialog, dark)
+        main = self._main_window()
+        _apply_appearance(dialog, bool(main is not None and main.has_css_class("restlos-dark")))
 
     def _add_actions(self) -> None:
         for name, callback in (
             ("about", self._show_about),
             ("recovery", self._show_recovery_center),
             ("open-history", self._open_history),
-            ("check-updates", self._check_updates_manually),
+            ("check-updates", lambda *_args: self.check_updates_now()),
         ):
             action = Gio.SimpleAction.new(name, None)
             action.connect("activate", callback)
@@ -1748,7 +2146,7 @@ class RestlosApplication(Gtk.Application):
         automatic = Gio.SimpleAction.new_stateful(
             "automatic-updates",
             None,
-            GLib.Variant.new_boolean(self.update_state.automatic_checks_enabled()),
+            GLib.Variant.new_boolean(self.updater.config()["automatic"]),
         )
         automatic.connect("change-state", self._change_automatic_updates)
         self.add_action(automatic)
@@ -1769,6 +2167,7 @@ class RestlosApplication(Gtk.Application):
             comments=APP_TAGLINE,
             copyright=_("2026 – lokale Open-Source-Ausgabe"),
             license_type=Gtk.License.MIT_X11,
+            logo_icon_name=APP_ID,
         )
         self._style_dialog(dialog)
         dialog.set_website(PROJECT_URL)
@@ -1776,24 +2175,127 @@ class RestlosApplication(Gtk.Application):
         dialog.present()
 
     def _show_recovery_center(self, _action, _parameter) -> None:
-        window = self.props.active_window
-        if isinstance(window, MainWindow):
+        window = self._main_window()
+        if window is not None:
             window.show_recovery_center()
 
-    def _open_history(self, _action, _parameter) -> None:
-        path = Path.home() / ".local/state/restlos/history"
-        path.mkdir(parents=True, exist_ok=True)
-        Gio.AppInfo.launch_default_for_uri(path.as_uri(), None)
+    def _open_history(self, *_args) -> None:
+        state_home = os.environ.get("XDG_STATE_HOME")
+        path = (Path(state_home) if state_home else Path.home() / ".local/state") / "restlos/history"
+        try:
+            path.mkdir(parents=True, exist_ok=True, mode=0o700)
+            Gio.AppInfo.launch_default_for_uri(path.as_uri(), None)
+        except (OSError, GLib.Error) as error:
+            self._show_message(_("Ordner konnte nicht geöffnet werden"), _("Pfad: {path}\n\n{error}", path=path, error=error),
+                               Gtk.MessageType.ERROR)
 
-    def _check_updates_manually(self, _action, _parameter) -> None:
-        self._start_update_check(automatic=False)
+    # ----- Updates -------------------------------------------------------------------------
+    def update_status(self) -> UpdateStatus | None:
+        try:
+            return self.updater.status()
+        except (OSError, UpdateError):
+            return None
+
+    def check_updates_now(self, *, automatic: bool = False) -> None:
+        if self._update_check_running:
+            return
+        self._update_check_running = True
+        window = self._main_window()
+        if window is not None:
+            window.show_update_status(self.update_status(), checking=True)
+        action = self.lookup_action("check-updates")
+        if isinstance(action, Gio.SimpleAction):
+            action.set_enabled(False)
+
+        def worker() -> None:
+            try:
+                status = self.updater.check()
+            except Exception:  # defensive boundary for the background worker
+                status = self.update_status()
+            GLib.idle_add(self._update_check_finished, status, automatic)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _update_check_finished(self, status: UpdateStatus | None, automatic: bool) -> bool:
+        self._update_check_running = False
+        action = self.lookup_action("check-updates")
+        if isinstance(action, Gio.SimpleAction):
+            action.set_enabled(True)
+        window = self._main_window()
+        if window is None or status is None:
+            return False
+        window.show_update_status(status)
+        if status.restart_ready:
+            self._announce(status, force=not automatic)
+        elif not automatic:
+            text, _tone = describe_update_status(status)
+            window.show_notice(text, seconds=8)
+        return False
+
+    def _announce(self, status: UpdateStatus, *, force: bool = False) -> None:
+        window = self._main_window()
+        if window is None or (status.pending == self._announced_version and not force):
+            return
+        self._announced_version = status.pending
+        window.show_notice(
+            _("Restlos Uninstaller {version} ist geprüft und bereit.", version=status.pending),
+            action_label=_("Jetzt neu starten und aktualisieren"),
+            action=self.restart_for_update,
+            seconds=0,
+        )
+
+    def restart_for_update(self) -> None:
+        window = self._main_window()
+        if window is not None and window.busy:
+            window.show_notice(_("Bitte warten, bis die laufende Aktion abgeschlossen ist. Danach neu starten."))
+            return
+        status = self.update_status()
+        if status is None or not status.restart_ready:
+            if window is not None:
+                window.show_notice(_("Es ist kein vorbereitetes Update vorhanden."))
+            return
+        self.restart_requested = True
+        self.quit()
+
+    def rollback_update(self) -> None:
+        try:
+            self.updater.rollback()
+        except (OSError, UpdateError) as error:
+            self._show_message(_("Zurückschalten fehlgeschlagen"), display_text(str(error)), Gtk.MessageType.ERROR)
+            return
+        window = self._main_window()
+        if window is not None:
+            window.show_update_status(self.update_status())
+            window.show_notice(_("Beim nächsten Start verwendet Restlos wieder die vorherige Version."), seconds=10)
+
+    def set_automatic_updates(self, enabled: bool) -> None:
+        try:
+            self.updater.save_config(automatic=enabled)
+        except (OSError, UpdateError) as error:
+            self._show_message(_("Einstellung nicht gespeichert"), display_text(str(error)), Gtk.MessageType.ERROR)
+            return
+        action = self.lookup_action("automatic-updates")
+        if isinstance(action, Gio.SimpleAction):
+            action.set_state(GLib.Variant.new_boolean(enabled))
+        window = self._main_window()
+        if window is not None:
+            window.show_update_status(self.update_status())
+        if enabled:
+            self.check_updates_now(automatic=True)
+
+    def save_update_repository(self, repository: str) -> None:
+        try:
+            self.updater.save_config(repository=repository)
+        except (OSError, UpdateError) as error:
+            self._show_message(_("Einstellung nicht gespeichert"), display_text(str(error)), Gtk.MessageType.ERROR)
+            return
+        window = self._main_window()
+        if window is not None:
+            window.show_notice(_("Update-Einstellungen gespeichert."))
+            window.show_update_status(self.update_status())
 
     def _change_automatic_updates(self, action: Gio.SimpleAction, value: GLib.Variant) -> None:
-        enabled = value.get_boolean()
-        self.update_state.set_automatic_checks(enabled)
-        action.set_state(value)
-        if enabled:
-            self._start_update_check(automatic=False)
+        self.set_automatic_updates(value.get_boolean())
 
     def _change_language(self, action: Gio.SimpleAction, value: GLib.Variant) -> None:
         selected = value.get_string()
@@ -1809,228 +2311,6 @@ class RestlosApplication(Gtk.Application):
             Gtk.MessageType.INFO,
         )
 
-    def _start_update_check(self, *, automatic: bool) -> None:
-        if self._update_check_running or self._update_install_running:
-            return
-        if automatic and not self.update_state.is_due():
-            return
-        self._update_check_running = True
-        action = self.lookup_action("check-updates")
-        if action is not None:
-            action.set_enabled(False)
-
-        def worker() -> None:
-            try:
-                release = UpdateClient(__version__).check()
-                self.update_state.record_attempt(True)
-                GLib.idle_add(self._update_check_finished, release, None, automatic)
-            except UpdateError as error:
-                self.update_state.record_attempt(False)
-                GLib.idle_add(self._update_check_finished, None, str(error), automatic)
-            except Exception as error:  # defensive boundary for the background worker
-                self.update_state.record_attempt(False)
-                GLib.idle_add(self._update_check_finished, None, str(error), automatic)
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _update_check_finished(
-        self,
-        release: ReleaseInfo | None,
-        error: str | None,
-        automatic: bool,
-    ) -> bool:
-        self._update_check_running = False
-        action = self.lookup_action("check-updates")
-        if action is not None:
-            action.set_enabled(True)
-        if error:
-            if not automatic:
-                self._show_message(
-                    _("Update-Suche fehlgeschlagen"),
-                    display_text(error),
-                    Gtk.MessageType.ERROR,
-                )
-            return False
-        if release is None:
-            if not automatic:
-                self._show_message(
-                    _("Restlos Uninstaller ist aktuell"),
-                    _("Version {version} ist die neueste verfügbare Ausgabe.", version=__version__),
-                    Gtk.MessageType.INFO,
-                )
-            return False
-        self._show_update_available(release)
-        return False
-
-    def _show_update_available(self, release: ReleaseInfo) -> None:
-        notes = release.notes.strip()
-        if len(notes) > 1400:
-            notes = notes[:1397].rstrip() + " …"
-        system_managed = is_system_managed_install()
-        update_note = (
-            _(
-                "Diese Installation wird vom Linux-Paketmanager verwaltet. Öffne die Release-Seite, "
-                "um das neue Systempaket zu beziehen."
-            )
-            if system_managed
-            else _(
-                "Das Update wird nur nach deiner Bestätigung geladen, per SHA-256 geprüft und atomar installiert."
-            )
-        )
-        details = (
-            _("Installiert: {version}", version=__version__) + "\n"
-            + _("Verfügbar: {version}", version=release.version) + "\n\n"
-            + (notes or _("Änderungen stehen auf der Release-Seite.")) + "\n\n"
-            + update_note
-        )
-        dialog = Gtk.MessageDialog(
-            transient_for=self.props.active_window,
-            modal=True,
-            message_type=Gtk.MessageType.INFO,
-            buttons=Gtk.ButtonsType.NONE,
-            text=_("Restlos Uninstaller {version} ist verfügbar", version=release.version),
-            secondary_text=details,
-        )
-        self._style_dialog(dialog)
-        dialog.add_button(_("Später"), Gtk.ResponseType.CANCEL)
-        release_page = dialog.add_button(_("Release-Seite"), Gtk.ResponseType.HELP)
-        if system_managed:
-            release_page.add_css_class("suggested-action")
-            dialog.set_default_response(Gtk.ResponseType.HELP)
-        else:
-            install = dialog.add_button(_("Herunterladen und installieren"), Gtk.ResponseType.ACCEPT)
-            install.add_css_class("suggested-action")
-            dialog.set_default_response(Gtk.ResponseType.ACCEPT)
-        dialog.connect("response", self._on_update_response, release)
-        dialog.present()
-
-    def _on_update_response(self, dialog: Gtk.MessageDialog, response: int, release: ReleaseInfo) -> None:
-        dialog.destroy()
-        if response == Gtk.ResponseType.HELP:
-            Gio.AppInfo.launch_default_for_uri(release.page_url, None)
-        elif response == Gtk.ResponseType.ACCEPT:
-            self._install_update(release)
-
-    def _install_update(self, release: ReleaseInfo) -> None:
-        if self._update_install_running:
-            return
-        self._update_install_running = True
-        action = self.lookup_action("check-updates")
-        if action is not None:
-            action.set_enabled(False)
-
-        dialog = Gtk.Dialog(
-            transient_for=self.props.active_window,
-            modal=True,
-            title=_("Restlos Uninstaller {version} installieren", version=release.version),
-        )
-        self._style_dialog(dialog)
-        dialog.set_deletable(False)
-        content = dialog.get_content_area()
-        content.set_spacing(14)
-        content.set_margin_top(24)
-        content.set_margin_bottom(24)
-        content.set_margin_start(26)
-        content.set_margin_end(26)
-        spinner = Gtk.Spinner()
-        spinner.set_size_request(42, 42)
-        spinner.set_halign(Gtk.Align.CENTER)
-        spinner.start()
-        content.append(spinner)
-        label = Gtk.Label(label=_("Update wird vorbereitet …"))
-        label.set_wrap(True)
-        label.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
-        label.set_max_width_chars(58)
-        content.append(label)
-        progress_bar = Gtk.ProgressBar()
-        progress_bar.set_size_request(460, -1)
-        content.append(progress_bar)
-        note = Gtk.Label(label=_("Der aktuelle Restlos Uninstaller bleibt bei einem Fehler weiterhin startfähig."))
-        note.set_wrap(True)
-        note.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
-        note.set_max_width_chars(58)
-        note.add_css_class("muted")
-        content.append(note)
-        self._update_progress_dialog = dialog
-        self._update_progress_label = label
-        self._update_progress_bar = progress_bar
-        self.hold()
-        dialog.present()
-
-        def progress(message: str, fraction: float) -> None:
-            GLib.idle_add(self._set_update_progress, message, fraction)
-
-        def worker() -> None:
-            try:
-                result = UpdateClient(__version__).install(release, progress=progress)
-                GLib.idle_add(self._update_install_finished, result.version, None)
-            except UpdateError as error:
-                GLib.idle_add(self._update_install_finished, None, str(error))
-            except Exception as error:  # defensive boundary for the background worker
-                GLib.idle_add(self._update_install_finished, None, str(error))
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _set_update_progress(self, message: str, fraction: float) -> bool:
-        if self._update_progress_label is not None:
-            self._update_progress_label.set_text(display_text(message))
-        if self._update_progress_bar is not None:
-            self._update_progress_bar.set_fraction(max(0.0, min(fraction, 1.0)))
-        return False
-
-    def _update_install_finished(self, version: str | None, error: str | None) -> bool:
-        self._update_install_running = False
-        action = self.lookup_action("check-updates")
-        if action is not None:
-            action.set_enabled(True)
-        if self._update_progress_dialog is not None:
-            self._update_progress_dialog.destroy()
-        self._update_progress_dialog = None
-        self._update_progress_label = None
-        self._update_progress_bar = None
-        self.release()
-        if error or version is None:
-            self._show_message(
-                _("Update nicht installiert"),
-                display_text(error) if error else _("Ein unbekannter Fehler ist aufgetreten."),
-                Gtk.MessageType.ERROR,
-            )
-            return False
-
-        dialog = Gtk.MessageDialog(
-            transient_for=self.props.active_window,
-            modal=True,
-            message_type=Gtk.MessageType.INFO,
-            buttons=Gtk.ButtonsType.NONE,
-            text=_("Restlos Uninstaller {version} wurde installiert", version=version),
-            secondary_text=_(
-                "Einstellungen und Entfernungshistorie wurden beibehalten. Starte Restlos Uninstaller jetzt neu, "
-                "damit die neue Version aktiv wird."
-            ),
-        )
-        self._style_dialog(dialog)
-        dialog.add_button(_("Später neu starten"), Gtk.ResponseType.CLOSE)
-        restart = dialog.add_button(_("Jetzt neu starten"), Gtk.ResponseType.ACCEPT)
-        restart.add_css_class("suggested-action")
-        dialog.set_default_response(Gtk.ResponseType.ACCEPT)
-        dialog.connect("response", self._on_restart_response)
-        dialog.present()
-        return False
-
-    def _on_restart_response(self, dialog: Gtk.MessageDialog, response: int) -> None:
-        dialog.destroy()
-        if response != Gtk.ResponseType.ACCEPT:
-            return
-        command = Path.home() / ".local/bin/restlos"
-        try:
-            os.execv(str(command), (str(command),))
-        except OSError as error:
-            self._show_message(
-                _("Neustart fehlgeschlagen"),
-                _("Starte Restlos Uninstaller manuell neu. Technisches Detail: {error}", error=error),
-                Gtk.MessageType.ERROR,
-            )
-
     def _show_message(self, title: str, details: str, message_type: Gtk.MessageType) -> None:
         dialog = Gtk.MessageDialog(
             transient_for=self.props.active_window,
@@ -2045,17 +2325,34 @@ class RestlosApplication(Gtk.Application):
         dialog.present()
 
 
+def _restart(base: Path) -> None:
+    # Die Basisversion wählt beim Neustart erneut (geprüfte neue Version oder Rückfall).
+    environment = dict(os.environ)
+    environment.pop("RESTLOS_LAUNCH_CHOSEN", None)
+    environment.pop("RESTLOS_BASE_DIR", None)
+    script = base / "run_restlos.py"
+    os.execve(sys.executable, [sys.executable, "-I", "-B", str(script)], environment)
+
+
 def run_gui() -> int:
-    Gtk.init()
-    display = Gdk.Display.get_default()
+    # Gtk.init() wirft ohne grafische Sitzung (SSH, TTY) eine Ausnahme; init_check meldet es sauber.
+    display = Gdk.Display.get_default() if Gtk.init_check() else None
     if display is None:
         print(_("Keine grafische Sitzung gefunden. Verwende `restlos list` oder `restlos analyze NAME`."))
         return 1
     provider = Gtk.CssProvider()
-    provider.load_from_data(CSS)
+    provider.load_from_data(CSS.encode("utf-8"))
     Gtk.StyleContext.add_provider_for_display(
         display,
         provider,
         Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
     )
-    return RestlosApplication().run(None)
+    Gtk.Window.set_default_icon_name(APP_ID)
+    application = RestlosApplication()
+    result = application.run(None)
+    if application.restart_requested:
+        try:
+            _restart(application.updater.base)
+        except OSError as error:
+            print(_("Neustart fehlgeschlagen: {error}", error=error), file=sys.stderr)
+    return result

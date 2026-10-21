@@ -1,5 +1,16 @@
 # Änderungsprotokoll
 
+## 2.1.0 – 2026-10-22
+
+- neues Erscheinungsbild wie Restlos Bewerbung: dunkle Petrol-Seitennavigation (Programme entfernen, Wiederherstellung, Updates & Startcheck), helle Karten, Mint-Akzente, Hero-Felder und Hinweise unten rechts; Hell/Dunkel per Knopf oder automatisch nach Systemdesign
+- neues Programmsymbol in der Restlos-Familie (Petrol-Verlauf, mintfarbener Papierkorb mit „R“ und Haken); bestehende Desktop- und Menüsymbole werden beim Start automatisch aktualisiert
+- signierte Selbstupdates nach dem Verfahren von Restlos Bewerbung: stündliche Prüfung, Ed25519-Signatur, Prüfsumme und Größe, Vorbereitung im Benutzerordner, „Jetzt neu starten und aktualisieren“ und automatischer Rückfall bei einem fehlgeschlagenen Start
+- Updatequelle korrigiert: ältere Versionen suchten unter dem früheren Projektnamen und fanden keine Releases
+- Releases entstehen automatisch, sobald Programmänderungen auf `main` landen
+- behoben: Ein Klick auf eine andere Anwendung während einer laufenden Analyse konnte die Markierung und den angezeigten Löschplan auseinanderlaufen lassen; die neue Auswahl wird jetzt nach der Analyse übernommen
+- behoben: Start ohne grafische Sitzung endete mit einem Python-Fehler statt mit einem Hinweis
+- behoben: Öffnen des Protokollordners ohne eingerichteten Dateimanager führte zu einem unbehandelten Fehler
+- pip-Installationen enthalten Update-Schlüssel und Symbol und versuchen kein In-App-Update mehr
 ## 2.0.0 – 2026-10-14
 
 - neue Oberfläche in der Designsprache von Restlos AIR mit leicht durchscheinenden Flächen, Mint-Akzenten, ruhigen Karten und kompakten Bedienelementen
@@ -74,7 +85,7 @@
 - neue App-ID `io.github.jurkast.Restlos` für Desktop-Eintrag, Symbol und GTK-Anwendung
 - Installer entfernt nach erfolgreichem Update alte Starter und Symbole mit `io.github.jurkastl.Restlos`
 - Scanner und Uninstaller erkennen weiterhin die bisherige sowie die provisorische App-ID
-- Projekt-, Download-, Fehler- und Sicherheitslinks zeigen auf `github.com/jurkast/restlos`
+- Projekt-, Download-, Fehler- und Sicherheitslinks zeigen auf `github.com/jurkast/restlos-uninstaller`
 
 ## 1.4.2 – 2026-08-30
 

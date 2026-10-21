@@ -28,14 +28,16 @@ jobs:
       - name: Systemabhängigkeiten installieren
         run: |
           sudo apt-get update
-          sudo apt-get install --yes appstream build-essential debhelper desktop-file-utils gir1.2-gtk-4.0 python3-gi dbus-x11 xvfb
+          sudo apt-get install --yes appstream build-essential debhelper desktop-file-utils gir1.2-gtk-4.0 python3-gi dbus-x11 xvfb openssl
 
       - name: Python- und Shell-Dateien prüfen
         run: |
-          python3 -m compileall -q restlos tests
+          python3 -m compileall -q restlos tests scripts
           bash -n install.sh update.sh uninstall.sh scripts/build-deb.sh scripts/build-release.sh scripts/build-source-package.sh
 
       - name: Regressionstests ausführen
+        env:
+          GTK_A11Y: none
         run: dbus-run-session -- xvfb-run -a python3 -m unittest discover -s tests -v
 
       - name: Isolierte Installation prüfen

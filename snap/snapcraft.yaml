@@ -1,6 +1,6 @@
 name: restlos-uninstaller
 base: core24
-version: "2.0.0"
+version: "2.1.0"
 summary: Safe Linux App & Game Uninstaller
 description: |
   Restlos Uninstaller detects applications and games from native package
@@ -23,6 +23,7 @@ parts:
       - desktop-file-utils
     stage-packages:
       - gir1.2-gtk-4.0
+      - openssl
       - policykit-1
       - python3
       - python3-gi

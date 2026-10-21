@@ -85,6 +85,16 @@ def find_application(query: str, applications):
     raise ValueError(_("Mehrdeutige Auswahl: {names}", names=names))
 
 
+def _confirm_started() -> None:
+    """Start-Handshake für vorbereitete Updates (siehe updater.choose_launch)."""
+    try:
+        from .updater import Updater
+
+        Updater().startup_ready()
+    except Exception:  # Ein Problem im Update-Zustand darf keinen Befehl verhindern.
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
     raw_arguments = list(argv) if argv is not None else sys.argv[1:]
     for index, value in enumerate(raw_arguments):
@@ -95,12 +105,18 @@ def main(argv: list[str] | None = None) -> int:
             configure(raw_arguments[index + 1])
             break
     parser = build_parser()
-    arguments = parser.parse_args(raw_arguments)
+    try:
+        arguments = parser.parse_args(raw_arguments)
+    except SystemExit:
+        _confirm_started()
+        raise
     if arguments.language:
         configure(arguments.language)
     if not arguments.command:
+        # Die GUI bestätigt den erfolgreichen Start erst, wenn ihr Fenster steht.
         from .gui import run_gui
         return run_gui()
+    _confirm_started()
 
     if arguments.command == "recovery":
         manager = RecoveryManager()

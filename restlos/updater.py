@@ -1,10 +1,21 @@
-"""Sichere Update-Prüfung und Installation offizieller Restlos-Releases."""
+"""Signierte Programmupdates – dasselbe Verfahren wie Restlos Bewerbung.
+
+Ablauf:
+1. Stündlich lädt Restlos das Manifest ``restlos-update.json`` samt Ed25519-Signatur aus dem
+   neuesten GitHub-Release und prüft die Signatur mit dem öffentlichen Schlüssel der
+   *installierten* Basisversion (Vertrauensanker ist nie das Update selbst).
+2. Ist die Version neuer, wird das Archiv geladen, Größe und SHA-256 geprüft und sicher nach
+   ``~/.local/share/restlos-uninstaller-updates/versions/<Version>`` entpackt. Keine Root-Rechte,
+   kein Eingriff in das Systempaket.
+3. ``run_restlos.py`` der Basisversion startet beim nächsten Öffnen die geprüfte Version.
+   Meldet diese ihren erfolgreichen Start nicht (Handshake über ``launch-pending.json``),
+   schaltet Restlos automatisch zurück und sperrt nur diese eine fehlerhafte Version.
+"""
 
 from __future__ import annotations
 
 import hashlib
 import json
-import math
 import os
 import re
 import shutil
@@ -14,433 +25,145 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Callable, Iterable
+from typing import Any, Callable, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, OpenerDirector, Request, build_opener
 
 
-REPOSITORIES = ("jurkast/restlos", "jurkastl/restlos")
-REPOSITORY = REPOSITORIES[0]
-RELEASES_APIS = tuple(f"https://api.github.com/repos/{repository}/releases?per_page=10" for repository in REPOSITORIES)
-RELEASES_API = RELEASES_APIS[0]
-CHECK_INTERVAL_SECONDS = 24 * 60 * 60
-RETRY_INTERVAL_SECONDS = 4 * 60 * 60
-NETWORK_TIMEOUT_SECONDS = 10.0
-INSTALL_TIMEOUT_SECONDS = 180.0
-MAX_METADATA_BYTES = 1_000_000
-MAX_CHECKSUM_BYTES = 4096
+APPLICATION = "restlos-uninstaller"
+DEFAULT_REPOSITORY = "jurkast/restlos-uninstaller"
+MANIFEST_NAME = "restlos-update.json"
+SIGNATURE_NAME = "restlos-update.sig"
+PUBLIC_KEY_NAME = "update-public.pem"
+CHECK_INTERVAL_SECONDS = 60 * 60
+FIRST_CHECK_DELAY_SECONDS = 3
+NETWORK_TIMEOUT_SECONDS = 20.0
+DOWNLOAD_DEADLINE_SECONDS = 600.0
+MAX_MANIFEST_BYTES = 64_000
+MAX_SIGNATURE_BYTES = 256
 MAX_ARCHIVE_BYTES = 250 * 1024 * 1024
 MAX_EXTRACTED_BYTES = 500 * 1024 * 1024
 MAX_ARCHIVE_MEMBERS = 5000
+MINIMUM_FREE_BYTES = 200 * 1024 * 1024
+TRUSTED_HOSTS = frozenset({"github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"})
+REQUIRED_FILES = ("run_restlos.py", "restlos/__init__.py", "restlos/cli.py", "restlos/gui.py", "restlos/updater.py")
 
-_VERSION_PATTERN = re.compile(r"^(?:v)?([0-9]+)\.([0-9]+)\.([0-9]+)$")
-_DIGEST_PATTERN = re.compile(r"^[a-fA-F0-9]{64}$")
-SYSTEM_UPDATE_CHANNELS = frozenset({"apt", "deb", "snap", "system"})
+_VERSION = re.compile(r"(\d+)\.(\d+)\.(\d+)")
+_REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+_DIGEST = re.compile(r"[a-f0-9]{64}")
+_VERSION_LINE = re.compile(r'^__version__ = "([^"]+)"$', re.MULTILINE)
+
+Version = tuple[int, int, int]
 
 
 class UpdateError(RuntimeError):
-    """Ein erwartbarer Fehler während Prüfung oder Installation."""
+    """Erwartbarer, verständlich formulierter Update-Fehler."""
 
 
-@dataclass(frozen=True, slots=True)
-class ReleaseInfo:
-    version: str
-    title: str
-    notes: str
-    page_url: str
-    archive_url: str
-    checksum_url: str
-    archive_digest: str
-    archive_size: int
-    prerelease: bool
+class Opener(Protocol):
+    def open(self, request: Request, timeout: float) -> Any: ...
 
 
-@dataclass(frozen=True, slots=True)
-class InstallResult:
-    version: str
-    output: str
+def parse_version(value: object) -> Version:
+    if not isinstance(value, str) or (match := _VERSION.fullmatch(value.strip())) is None:
+        raise UpdateError("Ungültige Versionsnummer.")
+    major, minor, patch = (int(part) for part in match.groups())
+    return major, minor, patch
 
 
-ProgressCallback = Callable[[str, float], None]
-
-
-def is_system_managed_install(environ: dict[str, str] | None = None) -> bool:
-    """Return whether updates must be installed by a system package manager."""
-    environment = os.environ if environ is None else environ
-    channel = environment.get("RESTLOS_UPDATE_CHANNEL", "").strip().casefold()
-    return channel in SYSTEM_UPDATE_CHANNELS
-
-
-def parse_version(value: str) -> tuple[int, int, int]:
-    match = _VERSION_PATTERN.fullmatch(value.strip())
-    if match is None:
-        raise ValueError(f"Ungültige Versionsnummer: {value}")
-    return tuple(int(part) for part in match.groups())  # type: ignore[return-value]
-
-
-def select_update(
-    releases: Iterable[object],
-    current_version: str,
-    *,
-    include_prereleases: bool = True,
-) -> ReleaseInfo | None:
-    current = parse_version(current_version)
-    candidates: list[tuple[tuple[int, int, int], ReleaseInfo]] = []
-    for raw_release in releases:
-        if not isinstance(raw_release, dict) or raw_release.get("draft") is True:
-            continue
-        prerelease = raw_release.get("prerelease") is True
-        if prerelease and not include_prereleases:
-            continue
-        tag = raw_release.get("tag_name")
-        if not isinstance(tag, str):
-            continue
-        try:
-            parsed = parse_version(tag)
-        except ValueError:
-            continue
-        version = ".".join(str(part) for part in parsed)
-        if tag != f"v{version}" or parsed <= current:
-            continue
-
-        archive_name = f"Restlos-{version}.tar.gz"
-        checksum_name = f"Restlos-{version}.sha256"
-        archive = _asset_by_name(raw_release.get("assets"), archive_name)
-        checksum = _asset_by_name(raw_release.get("assets"), checksum_name)
-        if archive is None or checksum is None:
-            continue
-
-        archive_url = archive.get("browser_download_url")
-        checksum_url = checksum.get("browser_download_url")
-        repository = _release_repository(version, archive_name, checksum_name, archive_url, checksum_url)
-        digest_value = archive.get("digest")
-        archive_size = archive.get("size")
-        if (
-            repository is None
-            or not isinstance(digest_value, str)
-            or not digest_value.startswith("sha256:")
-            or not _DIGEST_PATTERN.fullmatch(digest_value.removeprefix("sha256:"))
-            or not isinstance(archive_size, int)
-            or archive_size <= 0
-            or archive_size > MAX_ARCHIVE_BYTES
-        ):
-            continue
-
-        title = raw_release.get("name")
-        notes = raw_release.get("body")
-        release = ReleaseInfo(
-            version=version,
-            title=title.strip()[:200] if isinstance(title, str) and title.strip() else f"Restlos {version}",
-            notes=notes.strip()[:20_000] if isinstance(notes, str) else "",
-            page_url=f"https://github.com/{repository}/releases/tag/v{version}",
-            archive_url=archive_url,
-            checksum_url=checksum_url,
-            archive_digest=digest_value.removeprefix("sha256:").lower(),
-            archive_size=archive_size,
-            prerelease=prerelease,
-        )
-        candidates.append((parsed, release))
-    if not candidates:
-        return None
-    return max(candidates, key=lambda item: item[0])[1]
-
-
-def _asset_by_name(raw_assets: object, name: str) -> dict[str, object] | None:
-    if not isinstance(raw_assets, list):
-        return None
-    matches = [
-        asset
-        for asset in raw_assets
-        if isinstance(asset, dict) and asset.get("name") == name and asset.get("state") == "uploaded"
-    ]
-    return matches[0] if len(matches) == 1 else None
-
-
-def _release_repository(
-    version: str,
-    archive_name: str,
-    checksum_name: str,
-    archive_url: object,
-    checksum_url: object,
-) -> str | None:
-    for repository in REPOSITORIES:
-        prefix = f"https://github.com/{repository}/releases/download/v{version}/"
-        if archive_url == f"{prefix}{archive_name}" and checksum_url == f"{prefix}{checksum_name}":
-            return repository
-    return None
-
-
-def checksum_from_file(content: bytes, archive_name: str) -> str:
+def version_of(root: Path) -> str:
+    """Version eines Programmordners lesen, ohne dessen Code zu importieren."""
     try:
-        text = content.decode("ascii")
-    except UnicodeDecodeError as error:
-        raise UpdateError("Die Prüfsummendatei ist nicht gültig.") from error
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    if len(lines) != 1:
-        raise UpdateError("Die Prüfsummendatei muss genau einen Eintrag enthalten.")
-    match = re.fullmatch(r"([a-fA-F0-9]{64})[ \t]+\*?([^/\\]+)", lines[0])
-    if match is None or match.group(2) != archive_name:
-        raise UpdateError("Die Prüfsumme gehört nicht zum erwarteten Restlos-Archiv.")
-    return match.group(1).lower()
+        text = (root / "restlos/__init__.py").read_text(encoding="utf-8")
+    except OSError as error:
+        raise UpdateError("Die Programmversion konnte nicht gelesen werden.") from error
+    match = _VERSION_LINE.search(text)
+    if match is None:
+        raise UpdateError("Die Programmversion konnte nicht gelesen werden.")
+    parse_version(match.group(1))
+    return match.group(1)
 
 
-class UpdateState:
-    def __init__(self, path: Path | None = None, home: Path | None = None) -> None:
-        if path is not None:
-            self.path = path
-        elif home is not None:
-            self.path = home / ".local/state/restlos/update.json"
-        else:
-            state_home = os.environ.get("XDG_STATE_HOME")
-            base = Path(state_home) if state_home else Path.home() / ".local/state"
-            self.path = base / "restlos/update.json"
-
-    def automatic_checks_enabled(self) -> bool:
-        return self._read().get("automatic_checks", True) is not False
-
-    def set_automatic_checks(self, enabled: bool) -> None:
-        state = self._read()
-        state["automatic_checks"] = bool(enabled)
-        self._write(state)
-
-    def is_due(self, now: float | None = None) -> bool:
-        if not self.automatic_checks_enabled():
-            return False
-        state = self._read()
-        current = time.time() if now is None else now
-        last_attempt = _finite_number(state.get("last_attempt"))
-        if last_attempt is None or current < last_attempt:
-            return True
-        interval = CHECK_INTERVAL_SECONDS if state.get("last_attempt_succeeded") is True else RETRY_INTERVAL_SECONDS
-        return current - last_attempt >= interval
-
-    def record_attempt(self, succeeded: bool, now: float | None = None) -> None:
-        state = self._read()
-        current = time.time() if now is None else now
-        state["last_attempt"] = current
-        state["last_attempt_succeeded"] = bool(succeeded)
-        if succeeded:
-            state["last_success"] = current
-        self._write(state)
-
-    def _read(self) -> dict[str, object]:
-        try:
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            return {}
-        return raw if isinstance(raw, dict) else {}
-
-    def _write(self, state: dict[str, object]) -> None:
-        try:
-            self.path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
-                dir=self.path.parent,
-                prefix=f".{self.path.name}.",
-                delete=False,
-            ) as temporary:
-                json.dump(state, temporary, ensure_ascii=False, sort_keys=True)
-                temporary.write("\n")
-                temporary.flush()
-                os.fsync(temporary.fileno())
-                temporary_path = Path(temporary.name)
-            temporary_path.chmod(0o600)
-            os.replace(temporary_path, self.path)
-        except OSError:
-            try:
-                temporary_path.unlink(missing_ok=True)
-            except (OSError, UnboundLocalError):
-                pass
-
-
-def _finite_number(value: object) -> float | None:
-    if not isinstance(value, (int, float)) or isinstance(value, bool):
-        return None
-    number = float(value)
-    return number if math.isfinite(number) else None
-
-
-class UpdateClient:
-    def __init__(
-        self,
-        current_version: str,
-        *,
-        opener: Callable[..., object] = urlopen,
-        runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
-    ) -> None:
-        parse_version(current_version)
-        self.current_version = current_version
-        self._opener = opener
-        self._runner = runner
-
-    def check(self) -> ReleaseInfo | None:
-        failures: list[UpdateError] = []
-        had_valid_response = False
-        for releases_api in RELEASES_APIS:
-            try:
-                content = self._read_bytes(releases_api, MAX_METADATA_BYTES)
-                releases = json.loads(content.decode("utf-8"))
-                if not isinstance(releases, list):
-                    raise UpdateError("GitHub hat ein unerwartetes Release-Format geliefert.")
-            except (UnicodeDecodeError, json.JSONDecodeError) as error:
-                failures.append(UpdateError("GitHub hat keine gültigen Release-Daten geliefert."))
-                continue
-            except UpdateError as error:
-                failures.append(error)
-                continue
-            had_valid_response = True
-            selected = select_update(releases, self.current_version, include_prereleases=True)
-            if selected is not None:
-                return selected
-        if had_valid_response:
-            return None
-        raise failures[-1] if failures else UpdateError("GitHub hat keine Release-Daten geliefert.")
-
-    def install(
-        self,
-        release: ReleaseInfo,
-        *,
-        home: Path | None = None,
-        progress: ProgressCallback | None = None,
-    ) -> InstallResult:
-        if parse_version(release.version) <= parse_version(self.current_version):
-            raise UpdateError("Die ausgewählte Ausgabe ist nicht neuer als die installierte Version.")
-        report = progress or (lambda _message, _fraction: None)
-        archive_name = f"Restlos-{release.version}.tar.gz"
-        with tempfile.TemporaryDirectory(prefix="restlos-update-") as temporary_name:
-            temporary = Path(temporary_name)
-            report("Prüfsumme wird geladen …", 0.08)
-            checksum_content = self._read_bytes(release.checksum_url, MAX_CHECKSUM_BYTES)
-            expected = checksum_from_file(checksum_content, archive_name)
-            if expected != release.archive_digest:
-                raise UpdateError("GitHub-Digest und veröffentlichte Prüfsumme stimmen nicht überein.")
-
-            archive_path = temporary / archive_name
-            self._download_archive(release, archive_path, report)
-            report("SHA-256-Prüfsumme wird kontrolliert …", 0.76)
-            actual = _sha256(archive_path)
-            if actual != expected:
-                raise UpdateError("Die SHA-256-Prüfung des Updates ist fehlgeschlagen.")
-
-            report("Update wird sicher entpackt …", 0.84)
-            extract_home = temporary / "extract"
-            release_home = extract_release_archive(archive_path, extract_home, release.version)
-            installer = release_home / "install.sh"
-            if not installer.is_file():
-                raise UpdateError("Das Update enthält keinen Installer.")
-            installer.chmod(0o755)
-
-            report("Neue Version wird installiert …", 0.92)
-            try:
-                completed = self._runner(
-                    [str(installer)],
-                    cwd=str(release_home),
-                    capture_output=True,
-                    text=True,
-                    errors="replace",
-                    timeout=INSTALL_TIMEOUT_SECONDS,
-                    check=False,
-                )
-            except (OSError, subprocess.TimeoutExpired) as error:
-                raise UpdateError(f"Der Installer konnte nicht ausgeführt werden: {error}") from error
-            output = "\n".join(part.strip() for part in (completed.stdout, completed.stderr) if part.strip())
-            if completed.returncode != 0:
-                details = output[-2000:] or f"Exit-Code {completed.returncode}"
-                raise UpdateError(f"Die Installation ist fehlgeschlagen:\n{details}")
-
-            user_home = Path.home() if home is None else home
-            command = user_home / ".local/bin/restlos"
-            try:
-                verification = self._runner(
-                    [str(command), "--version"],
-                    capture_output=True,
-                    text=True,
-                    errors="replace",
-                    timeout=20.0,
-                    check=False,
-                )
-            except (OSError, subprocess.TimeoutExpired) as error:
-                raise UpdateError(f"Die installierte Version konnte nicht geprüft werden: {error}") from error
-            if verification.returncode != 0 or verification.stdout.strip() != f"Restlos {release.version}":
-                raise UpdateError("Die installierte Version hat die abschließende Selbstprüfung nicht bestanden.")
-            report("Update abgeschlossen.", 1.0)
-            return InstallResult(release.version, output)
-
-    def _read_bytes(self, url: str, maximum: int) -> bytes:
-        response = self._open(url)
-        try:
-            content = response.read(maximum + 1)
-        except OSError as error:
-            raise UpdateError(f"Der Download ist fehlgeschlagen: {error}") from error
-        finally:
-            response.close()
-        if len(content) > maximum:
-            raise UpdateError("Die heruntergeladene Datei überschreitet das Größenlimit.")
-        return content
-
-    def _download_archive(self, release: ReleaseInfo, target: Path, report: ProgressCallback) -> None:
-        response = self._open(release.archive_url)
-        downloaded = 0
-        digest = hashlib.sha256()
-        try:
-            with target.open("xb") as output:
-                while True:
-                    block = response.read(128 * 1024)
-                    if not block:
-                        break
-                    downloaded += len(block)
-                    if downloaded > MAX_ARCHIVE_BYTES:
-                        raise UpdateError("Das Update-Archiv überschreitet das Größenlimit.")
-                    digest.update(block)
-                    output.write(block)
-                    fraction = min(downloaded / max(release.archive_size, 1), 1.0)
-                    report("Update wird heruntergeladen …", 0.14 + fraction * 0.58)
-        except OSError as error:
-            raise UpdateError(f"Das Update-Archiv konnte nicht gespeichert werden: {error}") from error
-        finally:
-            response.close()
-        if downloaded != release.archive_size:
-            raise UpdateError("Die Größe des geladenen Update-Archivs ist unerwartet.")
-        if digest.hexdigest() != release.archive_digest:
-            raise UpdateError("Der GitHub-Digest des Update-Archivs stimmt nicht überein.")
-
-    def _open(self, url: str):
-        if not _trusted_https_url(url):
-            raise UpdateError("Eine nicht vertrauenswürdige Update-Adresse wurde abgelehnt.")
-        request = Request(
-            url,
-            headers={
-                "Accept": "application/vnd.github+json",
-                "User-Agent": f"Restlos/{self.current_version}",
-                "X-GitHub-Api-Version": "2022-11-28",
-            },
-            method="GET",
-        )
-        try:
-            response = self._opener(request, timeout=NETWORK_TIMEOUT_SECONDS)
-        except (HTTPError, URLError, OSError, TimeoutError) as error:
-            raise UpdateError(f"GitHub ist derzeit nicht erreichbar: {error}") from error
-        final_url = response.geturl()
-        if not _trusted_https_url(final_url):
-            response.close()
-            raise UpdateError("GitHub hat auf eine nicht vertrauenswürdige Adresse weitergeleitet.")
-        return response
-
-
-def _trusted_https_url(url: str) -> bool:
+def trusted_url(url: str) -> bool:
     try:
         parsed = urlparse(url)
     except ValueError:
         return False
-    hostname = (parsed.hostname or "").casefold()
     return (
         parsed.scheme == "https"
         and parsed.username is None
         and parsed.password is None
-        and (hostname in {"api.github.com", "github.com"} or hostname.endswith(".githubusercontent.com"))
+        and (parsed.hostname or "").casefold() in TRUSTED_HOSTS
     )
+
+
+class _TrustedRedirects(HTTPRedirectHandler):
+    # Jeder Umleitungsschritt wird geprüft, nicht nur das Ziel.
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        if not trusted_url(newurl):
+            raise UpdateError("Der Download wurde an eine unerwartete Adresse umgeleitet.")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _default_opener() -> OpenerDirector:
+    return build_opener(_TrustedRedirects())
+
+
+@dataclass(frozen=True, slots=True)
+class Manifest:
+    version: str
+    minimum_base: str
+    archive: str
+    size: int
+    sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class UpdateStatus:
+    running: str
+    pending: str
+    automatic: bool
+    repository: str
+    kind: str
+    version: str
+    detail: str
+    checked: float | None
+
+    @property
+    def restart_ready(self) -> bool:
+        return bool(self.pending)
+
+
+def _private_dir(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return path
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    try:
+        if path.is_symlink() or path.stat().st_size > 100_000:
+            return {}
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    _private_dir(path.parent)
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise
 
 
 def _sha256(path: Path) -> str:
@@ -449,6 +172,337 @@ def _sha256(path: Path) -> str:
         for block in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _default_home() -> Path:
+    if configured := os.environ.get("RESTLOS_UPDATE_DIR"):
+        return Path(configured)
+    data_home = os.environ.get("XDG_DATA_HOME")
+    return (Path(data_home) if data_home else Path.home() / ".local/share") / "restlos-uninstaller-updates"
+
+
+class Updater:
+    def __init__(
+        self,
+        *,
+        root: Path | None = None,
+        base: Path | None = None,
+        home: Path | None = None,
+        opener: Opener | None = None,
+        runner: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
+        self.root = (root or Path(__file__).resolve().parents[1]).resolve()
+        self.base = (base or Path(os.environ.get("RESTLOS_BASE_DIR", str(self.root)))).resolve()
+        self.home = home or _default_home()
+        self._opener = opener or _default_opener()
+        self._runner = runner
+        self._clock = clock
+
+    # ----- Zustand -------------------------------------------------------------------------
+    @property
+    def versions(self) -> Path:
+        return self.home / "versions"
+
+    def running_version(self) -> str:
+        return version_of(self.root)
+
+    def base_version(self) -> str:
+        return version_of(self.base)
+
+    def config(self) -> dict[str, Any]:
+        stored = _read_json(self.home / "settings.json")
+        repository = stored.get("repository")
+        return {
+            "repository": repository if isinstance(repository, str) and _valid_repository(repository) else DEFAULT_REPOSITORY,
+            "automatic": stored.get("automatic", True) is not False,
+            "blocked": stored.get("blocked", "") if isinstance(stored.get("blocked"), str) else "",
+        }
+
+    def save_config(self, *, repository: str | None = None, automatic: bool | None = None, blocked: str | None = None) -> None:
+        current = self.config()
+        if repository is not None:
+            repository = repository.strip()
+            if not _valid_repository(repository):
+                raise UpdateError("Bitte GitHub-Benutzer/Repository eingeben, zum Beispiel jurkast/restlos-uninstaller.")
+            current["repository"] = repository
+        if automatic is not None:
+            current["automatic"] = bool(automatic)
+        if blocked is not None:
+            current["blocked"] = blocked
+        _write_json(self.home / "settings.json", current)
+
+    def status(self) -> UpdateStatus:
+        config = self.config()
+        active = _read_json(self.home / "current.json").get("version", "")
+        running = self.running_version()
+        pending = ""
+        if isinstance(active, str) and active and active != running:
+            try:
+                if parse_version(active) > parse_version(running):
+                    pending = active
+            except UpdateError:
+                pending = ""
+        stored = _read_json(self.home / "status.json")
+        checked = stored.get("checked")
+        return UpdateStatus(
+            running=running,
+            pending=pending,
+            automatic=config["automatic"],
+            repository=config["repository"],
+            kind=str(stored.get("kind", "")),
+            version=str(stored.get("version", "")),
+            detail=str(stored.get("detail", "")),
+            checked=float(checked) if isinstance(checked, (int, float)) and not isinstance(checked, bool) else None,
+        )
+
+    def _record(self, kind: str, *, version: str = "", detail: str = "") -> None:
+        _write_json(
+            self.home / "status.json",
+            {"kind": kind, "version": version, "detail": detail, "checked": self._clock()},
+        )
+
+    # ----- Prüfung -------------------------------------------------------------------------
+    def verify(self, manifest_path: Path, signature_path: Path) -> Manifest:
+        public_key = self.base / "restlos" / PUBLIC_KEY_NAME
+        if not public_key.is_file():
+            raise UpdateError("Der öffentliche Update-Schlüssel fehlt in dieser Installation.")
+        try:
+            result = self._runner(
+                ["openssl", "pkeyutl", "-verify", "-pubin", "-inkey", str(public_key), "-rawin",
+                 "-in", str(manifest_path), "-sigfile", str(signature_path)],
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+        except FileNotFoundError as error:
+            raise UpdateError("OpenSSL fehlt. Bitte das Paket „openssl“ installieren.") from error
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise UpdateError("Die Update-Signatur konnte nicht geprüft werden.") from error
+        if result.returncode != 0:
+            raise UpdateError("Die Update-Signatur ist ungültig. Es wird nichts installiert.")
+        try:
+            raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError) as error:
+            raise UpdateError("Ungültige Update-Beschreibung.") from error
+        if not isinstance(raw, dict) or raw.get("application") != APPLICATION or raw.get("architecture") != "all":
+            raise UpdateError("Das Update passt nicht zu Restlos Uninstaller.")
+        version = raw.get("version")
+        minimum_base = raw.get("minimum_base")
+        archive = raw.get("archive")
+        size = raw.get("size")
+        digest = raw.get("sha256")
+        parse_version(version)
+        parse_version(minimum_base)
+        if not isinstance(archive, str) or archive != f"Restlos-{version}.tar.gz":
+            raise UpdateError("Ungültige Update-Beschreibung.")
+        if not isinstance(digest, str) or not _DIGEST.fullmatch(digest):
+            raise UpdateError("Ungültige Update-Beschreibung.")
+        if type(size) is not int or not 0 < size <= MAX_ARCHIVE_BYTES:
+            raise UpdateError("Ungültige Update-Größe.")
+        if parse_version(minimum_base) > parse_version(self.base_version()):
+            raise UpdateError("Dieses Update benötigt einmalig ein neueres Installationspaket.")
+        return Manifest(str(version), str(minimum_base), archive, size, digest)
+
+    def fetch(self, url: str, destination: Path, limit: int) -> None:
+        if not trusted_url(url):
+            raise UpdateError("Ungültige Update-Adresse.")
+        request = Request(url, headers={"User-Agent": f"Restlos-Uninstaller-Updater/{self.running_version()}"})
+        try:
+            response = self._opener.open(request, timeout=NETWORK_TIMEOUT_SECONDS)
+        except HTTPError as error:
+            if error.code == 404:
+                raise UpdateError("Noch kein passendes Update-Release gefunden.") from error
+            raise UpdateError(f"GitHub ist momentan nicht erreichbar (HTTP {error.code}).") from error
+        except UpdateError:
+            raise
+        except (URLError, OSError, TimeoutError) as error:
+            raise UpdateError("Die Updatequelle ist momentan nicht erreichbar. Die installierte Version bleibt nutzbar.") from error
+        started = time.monotonic()
+        total = 0
+        try:
+            with response, destination.open("xb") as output:
+                while block := response.read(256 * 1024):
+                    total += len(block)
+                    if total > limit:
+                        raise UpdateError("Die Update-Datei überschreitet die erlaubte Größe.")
+                    if time.monotonic() - started > DOWNLOAD_DEADLINE_SECONDS:
+                        raise UpdateError("Der Download hat zu lange gedauert. Bitte später erneut versuchen.")
+                    output.write(block)
+        except UpdateError:
+            raise
+        except (OSError, TimeoutError) as error:
+            raise UpdateError("Die Updatequelle ist momentan nicht erreichbar. Die installierte Version bleibt nutzbar.") from error
+
+    # ----- Vorbereitung --------------------------------------------------------------------
+    def stage(self, manifest_path: Path, signature_path: Path, archive_path: Path) -> str:
+        """Geprüftes Archiv für den nächsten Start bereitlegen. Gibt die Statusart zurück."""
+        manifest = self.verify(manifest_path, signature_path)
+        version = parse_version(manifest.version)
+        if version <= parse_version(self.running_version()):
+            return "current"
+        if manifest.version == self.config()["blocked"]:
+            return "blocked"
+        active = _read_json(self.home / "current.json")
+        active_version = active.get("version", "")
+        if active_version == manifest.version and (self.versions / manifest.version / "run_restlos.py").is_file():
+            return "ready"
+        if isinstance(active_version, str) and active_version:
+            try:
+                if parse_version(active_version) > version:
+                    return "ready"
+            except UpdateError:
+                pass
+        if archive_path.stat().st_size != manifest.size or _sha256(archive_path) != manifest.sha256:
+            raise UpdateError("Die Update-Datei ist beschädigt oder verändert. Es wird nichts installiert.")
+        _private_dir(self.home)
+        if shutil.disk_usage(self.home).free < MINIMUM_FREE_BYTES:
+            raise UpdateError("Für ein sicheres Update werden mindestens 200 MB freier Speicher benötigt.")
+        with tempfile.TemporaryDirectory(prefix="staging-", dir=self.home) as temporary:
+            release_root = extract_release_archive(archive_path, Path(temporary) / "extract", manifest.version)
+            for required in REQUIRED_FILES:
+                if not (release_root / required).is_file():
+                    raise UpdateError(f"Das Update ist unvollständig: {required}")
+            if version_of(release_root) != manifest.version:
+                raise UpdateError("Die Versionsangabe im Update stimmt nicht überein.")
+            shutil.copy2(manifest_path, release_root / "release.json")
+            shutil.copy2(signature_path, release_root / "release.sig")
+            destination = _private_dir(self.versions) / manifest.version
+            if destination.exists():
+                shutil.rmtree(destination)
+            release_root.rename(destination)
+        previous = active_version if isinstance(active_version, str) else ""
+        _write_json(self.home / "current.json", {"version": manifest.version, "previous": previous})
+        return "ready"
+
+    def supported(self) -> bool:
+        """Nur Installationen mit ``run_restlos.py`` können eine vorbereitete Version starten.
+
+        Ein per pip installiertes Paket startet über den Einstiegspunkt direkt in ``cli.main`` –
+        ein geladenes Update würde dort nie aktiv. Solche Installationen aktualisiert pip.
+        """
+        return (self.base / "run_restlos.py").is_file()
+
+    def check(self) -> UpdateStatus:
+        config = self.config()
+        base_url = f"https://github.com/{config['repository']}/releases/latest/download/"
+        _private_dir(self.home)
+        if not self.supported():
+            self._record("error", detail="Diese Installation wird über pip aktualisiert, nicht über das In-App-Update.")
+            return self.status()
+        try:
+            with tempfile.TemporaryDirectory(prefix="download-", dir=self.home) as temporary:
+                folder = Path(temporary)
+                manifest_path = folder / MANIFEST_NAME
+                signature_path = folder / SIGNATURE_NAME
+                self.fetch(base_url + MANIFEST_NAME, manifest_path, MAX_MANIFEST_BYTES)
+                self.fetch(base_url + SIGNATURE_NAME, signature_path, MAX_SIGNATURE_BYTES)
+                manifest = self.verify(manifest_path, signature_path)
+                active = _read_json(self.home / "current.json").get("version")
+                if parse_version(manifest.version) <= parse_version(self.running_version()):
+                    kind = "current"
+                elif manifest.version == config["blocked"]:
+                    kind = "blocked"
+                elif active == manifest.version and (self.versions / manifest.version / "run_restlos.py").is_file():
+                    kind = "ready"
+                else:
+                    archive_path = folder / manifest.archive
+                    self.fetch(base_url + manifest.archive, archive_path, manifest.size)
+                    kind = self.stage(manifest_path, signature_path, archive_path)
+                self._record(kind, version=manifest.version)
+        except UpdateError as error:
+            self._record("error", detail=str(error))
+        except (OSError, ValueError) as error:
+            self._record("error", detail=f"Update konnte nicht vorbereitet werden: {error}")
+        return self.status()
+
+    # ----- Start und Rückfall --------------------------------------------------------------
+    def rollback(self, *, failed_version: str = "") -> None:
+        active = _read_json(self.home / "current.json")
+        previous = active.get("previous", "")
+        if isinstance(previous, str) and previous and (self.versions / previous / "run_restlos.py").is_file():
+            _write_json(self.home / "current.json", {"version": previous, "previous": ""})
+        else:
+            (self.home / "current.json").unlink(missing_ok=True)
+        (self.home / "launch-pending.json").unlink(missing_ok=True)
+        blocked = failed_version or str(active.get("version", ""))
+        self.save_config(blocked=blocked)
+        self._record("rolled-back", version=blocked)
+
+    def startup_ready(self) -> None:
+        pending = _read_json(self.home / "launch-pending.json")
+        if pending.get("version") == self.running_version():
+            (self.home / "launch-pending.json").unlink(missing_ok=True)
+        try:
+            self.prune_versions()
+        except OSError:
+            pass
+
+    def prune_versions(self) -> list[str]:
+        """Nur laufende, aktive und vorherige Version behalten (für den Rückfall)."""
+        if not self.versions.is_dir():
+            return []
+        active = _read_json(self.home / "current.json")
+        keep = {self.running_version(), str(active.get("version", "")), str(active.get("previous", ""))}
+        pending = _read_json(self.home / "launch-pending.json").get("version")
+        if isinstance(pending, str):
+            keep.add(pending)
+        removed: list[str] = []
+        for entry in self.versions.iterdir():
+            if entry.name in keep or entry.is_symlink() or not entry.is_dir():
+                continue
+            try:
+                parse_version(entry.name)
+            except UpdateError:
+                continue
+            shutil.rmtree(entry)
+            removed.append(entry.name)
+        return sorted(removed)
+
+    def choose_launch(self) -> Path:
+        """Basis oder geprüfte, vorbereitete Version für diesen Start wählen."""
+        active = _read_json(self.home / "current.json")
+        version = active.get("version")
+        if not version:
+            return self.base
+        try:
+            if parse_version(version) <= parse_version(self.base_version()):
+                return self.base
+            pending = _read_json(self.home / "launch-pending.json")
+            if pending.get("version") == version:
+                pid = pending.get("pid")
+                if type(pid) is int and pid > 0 and _process_alive(pid):
+                    # Eine laufende Instanz ist kein gescheiterter Start.
+                    return self.base
+                self.rollback(failed_version=str(version))
+                return self.choose_launch()
+            target = self.versions / str(version)
+            manifest = self.verify(target / "release.json", target / "release.sig")
+            if manifest.version != version or version_of(target) != version:
+                raise UpdateError("Versionsprüfung fehlgeschlagen.")
+            for required in REQUIRED_FILES:
+                if not (target / required).is_file():
+                    raise UpdateError(f"Das Update ist unvollständig: {required}")
+            _write_json(self.home / "launch-pending.json", {"version": version, "pid": os.getpid()})
+            return target
+        except (UpdateError, OSError) as error:
+            self.rollback(failed_version=str(version))
+            self._record("error", detail=f"Update konnte nicht gestartet werden: {error}")
+            return self.base
+
+
+def _valid_repository(value: str) -> bool:
+    return bool(_REPOSITORY.fullmatch(value)) and not any(part in {".", ".."} for part in value.split("/"))
+
+
+def _process_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def extract_release_archive(archive_path: Path, destination: Path, version: str) -> Path:
@@ -478,21 +532,20 @@ def extract_release_archive(archive_path: Path, destination: Path, version: str)
                 total_size += max(member.size, 0)
                 if total_size > MAX_EXTRACTED_BYTES:
                     raise UpdateError("Der entpackte Inhalt überschreitet das Größenlimit.")
-
                 output_path = destination.joinpath(*path.parts)
                 if member.isdir():
-                    output_path.mkdir(parents=True, mode=0o755, exist_ok=True)
+                    output_path.mkdir(parents=True, mode=0o700, exist_ok=True)
                     continue
-                output_path.parent.mkdir(parents=True, mode=0o755, exist_ok=True)
+                output_path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
                 source = archive.extractfile(member)
                 if source is None:
                     raise UpdateError("Eine Datei im Update-Archiv konnte nicht gelesen werden.")
                 with source, output_path.open("xb") as output:
                     shutil.copyfileobj(source, output, length=128 * 1024)
-                output_path.chmod(0o755 if member.mode & 0o111 else 0o644)
+                output_path.chmod(0o700 if member.mode & 0o111 else 0o600)
     except (OSError, tarfile.TarError) as error:
         raise UpdateError(f"Das Update-Archiv konnte nicht entpackt werden: {error}") from error
-    release_home = destination / expected_root
-    if not release_home.is_dir():
+    release_root = destination / expected_root
+    if not release_root.is_dir():
         raise UpdateError("Das Update-Archiv besitzt keine gültige Wurzel.")
-    return release_home
+    return release_root
