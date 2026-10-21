@@ -27,6 +27,7 @@
 - a post-removal scan that reports additional residual paths separately from intentionally retained data
 - locked shared paths with an expandable list of known other applications and the specific references linking them
 - a pre-removal recheck of file metadata, known application associations, package state and native removal simulations
+- **Find leftovers** detects orphaned data of uninstalled programs (settings, caches, Flatpak and Snap data) and removes it through the reviewed removal plan
 - signed self-updates: hourly checks, Ed25519-verified releases, “Restart and update now” and automatic rollback if a new version fails to start
 
 For supported games, Restlos can include game folders, dedicated prefixes, manifests, workshop content, shader caches, local saves, screenshots, cover art, launchers and settings. Shared launcher directories and the default Wine prefix remain protected.
@@ -59,10 +60,10 @@ Download the latest package from [GitHub Releases](https://github.com/jurkast/re
 Install the native Debian package through the graphical software manager or with APT. APT resolves the required GTK and Python dependencies automatically:
 
 ```bash
-curl -LO https://github.com/jurkast/restlos-uninstaller/releases/download/v2.1.0/restlos-uninstaller_2.1.0-1_all.deb
-curl -LO https://github.com/jurkast/restlos-uninstaller/releases/download/v2.1.0/restlos-uninstaller_2.1.0-1_all.deb.sha256
-sha256sum --check restlos-uninstaller_2.1.0-1_all.deb.sha256
-sudo apt install ./restlos-uninstaller_2.1.0-1_all.deb
+curl -LO https://github.com/jurkast/restlos-uninstaller/releases/download/v2.2.0/restlos-uninstaller_2.2.0-1_all.deb
+curl -LO https://github.com/jurkast/restlos-uninstaller/releases/download/v2.2.0/restlos-uninstaller_2.2.0-1_all.deb.sha256
+sha256sum --check restlos-uninstaller_2.2.0-1_all.deb.sha256
+sudo apt install ./restlos-uninstaller_2.2.0-1_all.deb
 ```
 
 The application-menu entry explicitly starts the system package. If an older per-user installation still exists at `~/.local/bin/restlos`, use `/usr/bin/restlos` to address the package version unambiguously.
@@ -72,11 +73,11 @@ The application-menu entry explicitly starts the system package. If an older per
 For Fedora, Arch Linux, openSUSE, or a per-user installation:
 
 ```bash
-curl -LO https://github.com/jurkast/restlos-uninstaller/releases/download/v2.1.0/Restlos-2.1.0.tar.gz
-curl -LO https://github.com/jurkast/restlos-uninstaller/releases/download/v2.1.0/Restlos-2.1.0.sha256
-sha256sum --check Restlos-2.1.0.sha256
-tar -xzf Restlos-2.1.0.tar.gz
-cd Restlos-2.1.0
+curl -LO https://github.com/jurkast/restlos-uninstaller/releases/download/v2.2.0/Restlos-2.2.0.tar.gz
+curl -LO https://github.com/jurkast/restlos-uninstaller/releases/download/v2.2.0/Restlos-2.2.0.sha256
+sha256sum --check Restlos-2.2.0.sha256
+tar -xzf Restlos-2.2.0.tar.gz
+cd Restlos-2.2.0
 ./install.sh
 ```
 
@@ -138,7 +139,7 @@ Restlos uses the system language by default. Choose German or English from **Men
 
 Restlos updates itself with the same procedure as Restlos Bewerbung. Shortly after start and then hourly it downloads `restlos-update.json` and its signature from the latest GitHub release and verifies the Ed25519 signature with the public key of the **installed** version. Only then is the archive downloaded and checked against size and SHA-256. The verified version is prepared in `~/.local/share/restlos-uninstaller-updates/versions/` without a password and without touching system packages. A notice offers **Restart and update now**; otherwise the new version starts the next time Restlos is opened. If a new version does not reach its window, Restlos falls back automatically and skips only that version.
 
-**Once for versions up to 2.0:** older releases do not know the signed procedure yet. Install 2.1.0 once with the Debian package or `install.sh`; all later updates arrive automatically.
+**Once for versions up to 2.0:** older releases do not know the signed procedure yet. Install 2.2.0 once with the Debian package or `install.sh`; all later updates arrive automatically.
 
 ## Safety model
 

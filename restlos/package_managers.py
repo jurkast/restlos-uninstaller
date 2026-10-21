@@ -16,7 +16,13 @@ from .utils import DesktopEntry, run_command
 
 PACKAGE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9@+._:-]*$")
 _ANSI_PATTERN = re.compile(r"\x1b\[[0-9;]*m")
-_TRUSTED_BINARY_DIRECTORIES = (Path("/usr/bin"), Path("/bin"), Path("/usr/sbin"), Path("/sbin"))
+# Anmeldebildschirm, Sitzung, Ton und Paketsysteme: ohne sie ist der Desktop nicht mehr bedienbar.
+COMMON_PROTECTED_PACKAGES = (
+    "gdm", "gdm3", "lightdm", "sddm", "gnome-session", "mutter", "kwin", "kwin-wayland", "kwin-x11",
+    "pipewire", "wireplumber", "pulseaudio", "dbus", "dbus-broker", "xwayland", "snapd", "flatpak",
+    "plasma-workspace", "cinnamon", "xfce4-session", "mate-session-manager",
+)
+_TRUSTED_BINARY_DIRECTORIES =(Path("/usr/bin"), Path("/bin"), Path("/usr/sbin"), Path("/sbin"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,7 +76,7 @@ class PackageManagerAdapter(ABC):
         return any(
             normalized == protected.casefold()
             or normalized.startswith(f"{protected.casefold()}-")
-            for protected in self.protected_packages
+            for protected in (*self.protected_packages, *COMMON_PROTECTED_PACKAGES)
         )
 
     def _records(
@@ -133,6 +139,21 @@ class AptAdapter(PackageManagerAdapter):
         "policykit",
         "polkit",
         "xorg",
+        "xserver-xorg",
+        "xwayland",
+        "gdm3",
+        "lightdm",
+        "sddm",
+        "gnome-session",
+        "ubuntu-session",
+        "zorin-desktop",
+        "mutter",
+        "pipewire",
+        "wireplumber",
+        "pulseaudio",
+        "dbus",
+        "snapd",
+        "flatpak",
     )
 
     def available(self) -> bool:

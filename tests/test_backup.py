@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import socket
 import io
 import tarfile
 import tempfile
@@ -92,7 +95,7 @@ class BackupTests(unittest.TestCase):
         self.assertEqual(self.manager.candidates(targets), [])
         escaped.rmdir()
 
-    def test_backup_skips_symlinks_and_restores_without_overwrite(self) -> None:
+    def test_backup_keeps_symlinks_as_links_and_restores_without_overwrite(self) -> None:
         config = self.home / ".config/demo-app"
         config.mkdir()
         (config / "settings.json").write_text('{"theme":"dark"}', encoding="utf-8")
@@ -104,8 +107,9 @@ class BackupTests(unittest.TestCase):
         )
         self.assertEqual(len(items), 1)
         with tarfile.open(archive_path, "r:gz") as archive:
+            link = archive.getmember("items/0000/external-link")
             names = archive.getnames()
-        self.assertNotIn("items/0000/external-link", names)
+        self.assertTrue(link.issym())  # Nur der Link, nie der Inhalt des Ziels.
         self.assertIn("manifest.json", names)
 
         for child in config.iterdir():
@@ -113,9 +117,28 @@ class BackupTests(unittest.TestCase):
         config.rmdir()
         self.manager.restore_item(Path(archive_path), items[0])
         self.assertEqual((config / "settings.json").read_text(encoding="utf-8"), '{"theme":"dark"}')
+        self.assertTrue((config / "external-link").is_symlink())
+        self.assertEqual(os.readlink(config / "external-link"), str(outside))
         self.assertEqual(outside.read_text(encoding="utf-8"), "keep")
         with self.assertRaises(FileExistsError):
             self.manager.restore_item(Path(archive_path), items[0])
+
+    def test_hardlinks_and_sockets_do_not_abort_backup(self) -> None:
+        prefix = self.home / ".local/share/demo-app/pfx"
+        prefix.mkdir(parents=True)
+        original = prefix / "system.reg"
+        original.write_text("registry", encoding="utf-8")
+        os.link(original, prefix / "system-copy.reg")
+        server = socket.socket(socket.AF_UNIX)
+        self.addCleanup(server.close)
+        server.bind(str(prefix / "ipc.sock"))
+        archive_path, items = self.manager.create(
+            [RemovalTarget(prefix.parent, "Anwendungsdaten", 16, Confidence.CERTAIN)]
+        )
+        shutil.rmtree(prefix.parent)
+        self.manager.restore_item(Path(archive_path), items[0])
+        self.assertEqual((prefix / "system-copy.reg").read_text(encoding="utf-8"), "registry")
+        self.assertFalse((prefix / "ipc.sock").exists())
 
     def test_failed_backup_aborts_before_any_removal(self) -> None:
         config = self.home / ".config/demo-app"

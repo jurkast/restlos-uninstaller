@@ -87,6 +87,24 @@ class AnalyzerTests(unittest.TestCase):
         self.assertIn(config, paths)
         self.assertIn(launcher, paths)
         self.assertIn(desktop, paths)
+        # Downloads gehören dem Menschen: Installer werden angeboten, aber nie vorausgewählt.
+        for target in plan.targets:
+            if target.path in {source_root, archive}:
+                self.assertFalse(target.selected)
+
+    def test_personal_folders_on_desktop_and_downloads_are_not_program_data(self) -> None:
+        artwork = self.home / "Schreibtisch/Krita"
+        artwork.mkdir(parents=True)
+        (artwork / "bild.kra").write_bytes(b"art")
+        downloads = self.home / "Downloads/Krita"
+        downloads.mkdir(parents=True)
+        launcher = self.home / "Schreibtisch/krita.desktop"
+        launcher.write_text("[Desktop Entry]\nType=Application\n", encoding="utf-8")
+        app = AppRecord("flatpak:user:org.kde.krita", "Krita", SourceKind.MANUAL, "org.kde.krita")
+        paths = {target.path for target in RemovalAnalyzer(self.home).discover_targets(app)}
+        self.assertNotIn(artwork, paths)
+        self.assertNotIn(downloads, paths)
+        self.assertIn(launcher, paths)
 
     def test_update_cache_and_user_startup_files_are_detected(self) -> None:
         updater = self.home / ".cache/Vendor/TestQuestUpdater"

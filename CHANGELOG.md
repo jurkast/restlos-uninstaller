@@ -1,5 +1,17 @@
 # Änderungsprotokoll
 
+## 2.2.0 – 2026-10-22
+
+- neu: **Reste finden** – sucht Einstellungen, Zwischenspeicher sowie Flatpak- und Snap-Daten von Programmen, die nicht mehr installiert sind, zeigt Größe und letzte Änderung und öffnet für jeden Fund den normalen, geprüften Löschplan
+- neu: Tastenkürzel – Strg+F sucht, F5/Strg+R liest neu ein, Strg+1 bis Strg+4 wechseln die Seiten
+- präziseres Beenden laufender Prozesse: Beim Entfernen eines Spiels werden nur Prozesse beendet, die dessen Dateien oder Präfix benutzen. Der Steam-Client und andere laufende Spiele bleiben offen; Lutris und Heroic werden nur gebeten, sich zu schließen, und nie hart beendet
+- ein Update, das nicht startet, wird jetzt sofort im selben Start zurückgenommen – statt erst beim nächsten Öffnen
+- behoben: Ein Ordner auf dem Schreibtisch oder in Downloads mit dem Namen eines Programms (z. B. eigene Bilder in „Krita“) konnte als Programmrest vorausgewählt werden. Dort zählen jetzt nur Starter und Installer, und Installer werden nie vorausgewählt
+- behoben: Safety Backups brachen bei Wine-/Proton-Präfixen mit Hardlinks ab; Symlinks werden jetzt gesichert und als Links wiederhergestellt, Sockets übersprungen
+- behoben: Wiederherstellung meldete einen Fehler, wenn ein Teil des Papierkorbs inzwischen geleert war
+- behoben: Ein manipuliertes Steam-Manifest konnte einen Ordner außerhalb von Steam vorschlagen
+- erweitert: Anmeldebildschirm, Sitzung, Ton (PipeWire/PulseAudio), D-Bus, Snap und Flatpak sind auf allen Distributionen vor Entfernung geschützt
+- AppImages auf dem „Schreibtisch“ werden erkannt; lange Pfade im Löschplan werden in der Mitte gekürzt
 ## 2.1.0 – 2026-10-22
 
 - neues Erscheinungsbild wie Restlos Bewerbung: dunkle Petrol-Seitennavigation (Programme entfernen, Wiederherstellung, Updates & Startcheck), helle Karten, Mint-Akzente, Hero-Felder und Hinweise unten rechts; Hell/Dunkel per Knopf oder automatisch nach Systemdesign

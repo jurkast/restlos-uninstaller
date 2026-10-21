@@ -22,6 +22,7 @@ from .locations import LocationResolver, LocationResult, folder_for_path
 from .models import AppRecord, Confidence, RecoveryRecord, RemovalPlan, RemovalResult, RestoreResult, SourceKind
 from .recovery import RecoveryManager
 from .remover import RemovalExecutor
+from .leftovers import Leftover, LeftoverScanner
 from .scanners import ApplicationScanner
 from .updater import CHECK_INTERVAL_SECONDS, FIRST_CHECK_DELAY_SECONDS, Updater, UpdateError, UpdateStatus
 from .utils import format_size
@@ -81,9 +82,10 @@ button.nav.active .nav-count { color: #9bf1dc; }
   border-radius: 15px; border: 1px solid; padding: 18px;
 }
 .list-card { padding: 14px; }
-.stat-tile { border-radius: 12px; padding: 13px 15px; }
-.stat-heading { font-size: 0.72em; font-weight: 800; letter-spacing: 1.6px; }
-.stat-value { font-size: 1.35em; font-weight: 800; }
+.stat-tile { border-radius: 12px; padding: 8px 13px; }
+.stat-heading { font-size: 0.68em; font-weight: 800; letter-spacing: 1.4px; }
+.stat-value { font-size: 1.15em; font-weight: 800; }
+.detail-hero { padding: 14px 18px; }
 .hero {
   border-radius: 17px; padding: 26px 30px; background-color: #183c48; color: #ffffff;
 }
@@ -426,7 +428,8 @@ class TargetRow(Gtk.ListBoxRow):
         labels.set_hexpand(True)
         path_label = Gtk.Label(label=str(target.path), xalign=0)
         path_label.set_selectable(True)
-        path_label.set_ellipsize(Pango.EllipsizeMode.END)
+        # Mitte kürzen: der aussagekräftige Ordnername am Ende bleibt sichtbar.
+        path_label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
         path_label.set_tooltip_text(str(target.path))
         labels.append(path_label)
         reason = Gtk.Label(label=display_text(target.reason), xalign=0)
@@ -481,7 +484,7 @@ class TargetRow(Gtk.ListBoxRow):
 
 
 class MainWindow(Gtk.ApplicationWindow):
-    PAGES = ("apps", "recovery", "updates")
+    PAGES = ("apps", "leftovers", "recovery", "updates")
 
     def __init__(self, application: Gtk.Application) -> None:
         super().__init__(application=application, title=APP_NAME)
@@ -523,8 +526,10 @@ class MainWindow(Gtk.ApplicationWindow):
         self._pending_selection: AppRecord | None = None
         self.busy = False
 
+        self._leftovers_state = "new"  # new | loading | ready
         self._build_header()
         self._build_shell()
+        self._install_shortcuts()
         self._load_applications()
 
     # ----- Darstellung ---------------------------------------------------------------------
@@ -647,6 +652,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.page_stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
         self.page_stack.set_transition_duration(120)
         self.page_stack.add_named(self._apps_page(), "apps")
+        self.page_stack.add_named(self._leftovers_page(), "leftovers")
         self.page_stack.add_named(self._recovery_page(), "recovery")
         self.page_stack.add_named(self._updates_page(), "updates")
         overlay.set_child(self.page_stack)
@@ -674,6 +680,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.nav_counts: dict[str, Gtk.Label] = {}
         for page, symbol, text in (
             ("apps", "▤", _("Programme entfernen")),
+            ("leftovers", "◌", _("Reste finden")),
             ("recovery", "↺", _("Wiederherstellung")),
             ("updates", "↻", _("Updates & Startcheck")),
         ):
@@ -738,6 +745,8 @@ class MainWindow(Gtk.ApplicationWindow):
                 button.remove_css_class("active")
         if page == "recovery":
             self._load_recovery_records()
+        elif page == "leftovers" and self._leftovers_state == "new":
+            self._load_leftovers()
         elif page == "updates":
             application = self.get_application()
             if isinstance(application, RestlosApplication):
@@ -1065,7 +1074,7 @@ class MainWindow(Gtk.ApplicationWindow):
         title.add_css_class("stat-heading")
         title.set_wrap(True)
         title.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
-        title.set_max_width_chars(18)
+        title.set_max_width_chars(30)
         tile.append(title)
         value = Gtk.Label(label="—", xalign=0)
         value.add_css_class("stat-value")
@@ -1248,7 +1257,7 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _show_app_header(self, app: AppRecord) -> None:
         _clear_box(self.detail_icon_box)
-        self.detail_icon_box.append(_icon_widget(app.icon, 64))
+        self.detail_icon_box.append(_icon_widget(app.icon, 52))
         self.detail_name.set_text(app.name)
         self.detail_name.set_tooltip_text(app.name)
         self.detail_description.set_text(display_text(app.description) or _("Keine Beschreibung verfügbar"))
@@ -1492,9 +1501,19 @@ class MainWindow(Gtk.ApplicationWindow):
         backup_targets = BackupManager().candidates(plan.selected_targets) if create_backup else []
         processes = RemovalExecutor().related_processes(plan)
         process_note = ""
-        if processes:
-            names = ", ".join(f"{name} (PID {pid})" for pid, name in processes[:5])
-            process_note = _("\n\nLaufende Prozesse: {names}", names=names)
+        programs = [item for item in processes if not getattr(item, "launcher", False)]
+        launchers = sorted({item[1] for item in processes if getattr(item, "launcher", False)})
+        if programs:
+            names = ", ".join(f"{item[1]} (PID {item[0]})" for item in programs[:5])
+            if len(programs) > 5:
+                names += _(" und {count} weitere", count=len(programs) - 5)
+            process_note += _("\n\nLaufende Prozesse: {names}", names=names)
+        if launchers:
+            process_note += _(
+                "\n\n{names} wird gebeten, sich zu schließen, damit die Bibliothek sauber aktualisiert wird. "
+                "Andere laufende Spiele bleiben unberührt.",
+                names=", ".join(launchers),
+            )
         mode = _("dauerhaft gelöscht") if permanent else _("wiederherstellbar in den Papierkorb verschoben")
         recovery_note = ""
         if not permanent and plan.actions:
@@ -1684,6 +1703,7 @@ class MainWindow(Gtk.ApplicationWindow):
             self.current_app = None
             self.current_plan = None
             self.detail_stack.set_visible_child_name("empty")
+            self._leftovers_state = "new" if self._leftovers_state == "ready" else self._leftovers_state
             self._load_applications()
         else:
             self.detail_stack.set_visible_child_name("detail")
@@ -1692,6 +1712,159 @@ class MainWindow(Gtk.ApplicationWindow):
                 self._analyze_current()
         if response == Gtk.ResponseType.HELP:
             self.show_recovery_center()
+
+    # ----- Tastenkürzel ------------------------------------------------------------------------
+    def _install_shortcuts(self) -> None:
+        controller = Gtk.ShortcutController()
+        controller.set_scope(Gtk.ShortcutScope.GLOBAL)
+
+        def search(*_args) -> bool:
+            self.navigate("apps")
+            self.search.grab_focus()
+            return True
+
+        def reload(*_args) -> bool:
+            page = self.page_stack.get_visible_child_name()
+            if page == "leftovers":
+                self._load_leftovers()
+            elif page == "recovery":
+                self._load_recovery_records(force=True)
+            else:
+                self._load_applications()
+            return True
+
+        bindings: list[tuple[str, object]] = [("<Control>f", search), ("F5", reload), ("<Control>r", reload)]
+        for index, page in enumerate(self.PAGES, start=1):
+            bindings.append((f"<Control>{index}", lambda *_args, name=page: (self.navigate(name), True)[1]))
+        for trigger, callback in bindings:
+            controller.add_shortcut(Gtk.Shortcut.new(Gtk.ShortcutTrigger.parse_string(trigger), Gtk.CallbackAction.new(callback)))
+        self.add_controller(controller)
+
+    # ----- Seite: Reste finden ---------------------------------------------------------------------
+    def _leftovers_page(self) -> Gtk.Widget:
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
+        _margins(page, 26, 30, 22, 30)
+        self.leftovers_button = Gtk.Button(label=_("Erneut suchen"))
+        self.leftovers_button.connect("clicked", lambda _button: self._load_leftovers())
+        page.append(self._page_top(_("VERWAISTE DATEN"), _("Reste finden"), self.leftovers_button))
+
+        hero = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=24)
+        hero.add_css_class("hero")
+        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        text.set_hexpand(True)
+        text.append(_label(_("Daten längst entfernter Programme"), "hero-title", wrap=True))
+        text.append(_label(
+            _("Restlos sucht Einstellungen, Zwischenspeicher und Sandbox-Daten, zu denen kein installiertes "
+              "Programm mehr passt. Jeder Fund wird erst nach Prüfung im Löschplan entfernt – standardmäßig in "
+              "den Papierkorb."),
+            "hero-text", wrap=True,
+        ))
+        hero.append(text)
+        numbers = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        numbers.set_valign(Gtk.Align.CENTER)
+        self.leftovers_size = _label("—", "hero-number", "hero-version", xalign=1)
+        numbers.append(self.leftovers_size)
+        self.leftovers_count = _label(_("noch nicht gesucht"), "hero-number-label", xalign=1)
+        numbers.append(self.leftovers_count)
+        hero.append(numbers)
+        page.append(hero)
+
+        self.leftovers_list = Gtk.ListBox()
+        self.leftovers_list.set_selection_mode(Gtk.SelectionMode.NONE)
+        self.leftovers_list.add_css_class("card")
+        self.leftovers_list.set_valign(Gtk.Align.START)
+        page.append(self._page_scroll(self.leftovers_list))
+        return page
+
+    def _load_leftovers(self) -> None:
+        if self._leftovers_state == "loading":
+            return
+        self._leftovers_state = "loading"
+        self.leftovers_button.set_sensitive(False)
+        _clear_box(self.leftovers_list)
+        loading = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        loading.set_halign(Gtk.Align.CENTER)
+        _margins(loading, 36, 12)
+        spinner = Gtk.Spinner()
+        spinner.start()
+        loading.append(spinner)
+        loading.append(_label(_("Einstellungen, Zwischenspeicher und Sandbox-Daten werden geprüft …"), wrap=True))
+        self.leftovers_list.append(loading)
+        known = list(self.apps)
+
+        def worker() -> None:
+            try:
+                applications = known or ApplicationScanner().scan()
+                found = LeftoverScanner().scan(applications)
+                GLib.idle_add(self._leftovers_loaded, found, None)
+            except Exception as error:  # defensive boundary for the GUI worker
+                GLib.idle_add(self._leftovers_loaded, [], str(error))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _leftovers_loaded(self, found: list[Leftover], error: str | None) -> bool:
+        self._leftovers_state = "ready"
+        self.leftovers_button.set_sensitive(True)
+        _clear_box(self.leftovers_list)
+        total = sum(item.size for item in found)
+        self.leftovers_size.set_text(format_size(total) if found else "0")
+        self.leftovers_count.set_text(_("{count} mögliche Reste", count=len(found)))
+        self.nav_counts["leftovers"].set_text(str(len(found)) if found else "")
+        if error or not found:
+            text = (_("Reste konnten nicht gesucht werden: {error}", error=error) if error
+                    else _("Keine verwaisten Daten gefunden. Alles sauber."))
+            empty = _label(text, "muted", xalign=0.5, wrap=True)
+            _margins(empty, 36, 12)
+            self.leftovers_list.append(empty)
+            return False
+        for item in found:
+            self.leftovers_list.append(self._leftover_row(item))
+        return False
+
+    def _leftover_row(self, item: Leftover) -> Gtk.ListBoxRow:
+        row = Gtk.ListBoxRow()
+        row.set_selectable(False)
+        row.add_css_class("target-row")
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=14)
+        _margins(box, 8, 8)
+        icon = _label("◌", "info-icon", xalign=0.5)
+        icon.set_valign(Gtk.Align.CENTER)
+        box.append(icon)
+        labels = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        labels.set_hexpand(True)
+        name = _label(item.path.name, "app-name", ellipsize=True)
+        labels.append(name)
+        path = _label(str(item.path), "muted", ellipsize=True)
+        path.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+        path.set_tooltip_text(str(item.path))
+        labels.append(path)
+        changed = time.strftime("%d.%m.%Y", time.localtime(item.modified)) if item.modified else "—"
+        labels.append(_label(
+            _("{reason} · zuletzt geändert {date}", reason=display_text(item.reason), date=changed), "muted", wrap=True,
+        ))
+        box.append(labels)
+        size = _label(format_size(item.size), "app-name", xalign=1)
+        size.set_valign(Gtk.Align.CENTER)
+        box.append(size)
+        open_button = Gtk.Button.new_from_icon_name("folder-open-symbolic")
+        open_button.set_valign(Gtk.Align.CENTER)
+        open_button.set_tooltip_text(_("Ordner öffnen: {path}", path=item.path))
+        open_button.connect("clicked", lambda _button, value=item.path: self._open_folder(value))
+        box.append(open_button)
+        review = Gtk.Button(label=_("Prüfen"))
+        review.add_css_class("primary")
+        review.set_valign(Gtk.Align.CENTER)
+        review.set_tooltip_text(_("Löschplan für diesen Ordner erstellen"))
+        review.connect("clicked", lambda _button, value=item.path: self._review_leftover(value))
+        box.append(review)
+        row.set_child(box)
+        return row
+
+    def _review_leftover(self, path: Path) -> None:
+        if self.busy:
+            self.show_notice(_("Bitte warten, bis die laufende Aktion abgeschlossen ist."))
+            return
+        self._add_manual_folder(path)
 
     # ----- Seite: Wiederherstellung --------------------------------------------------------------
     def _recovery_page(self) -> Gtk.Widget:
@@ -2338,6 +2511,11 @@ def run_gui() -> int:
     # Gtk.init() wirft ohne grafische Sitzung (SSH, TTY) eine Ausnahme; init_check meldet es sauber.
     display = Gdk.Display.get_default() if Gtk.init_check() else None
     if display is None:
+        # Kein Startfehler der Programmversion – sonst würde ein Update fälschlich zurückgenommen.
+        try:
+            Updater().startup_ready()
+        except (OSError, UpdateError):
+            pass
         print(_("Keine grafische Sitzung gefunden. Verwende `restlos list` oder `restlos analyze NAME`."))
         return 1
     provider = Gtk.CssProvider()

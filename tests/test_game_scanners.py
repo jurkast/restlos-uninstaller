@@ -78,6 +78,18 @@ class GamePlatformScannerTests(unittest.TestCase):
         self.assertIn(str(game), owned)
         self.assertIn(str(steamapps / "compatdata/123"), owned)
 
+    def test_steam_manifest_cannot_point_outside_steamapps(self) -> None:
+        steamapps = self.home / ".steam/debian-installation/steamapps"
+        (steamapps / "common").mkdir(parents=True)
+        (self.home / "Dokumente").mkdir()
+        for app_id, install_dir in (("7", ".."), ("8", "../../../Dokumente"), ("9", str(self.home / "Dokumente"))):
+            (steamapps / f"appmanifest_{app_id}.acf").write_text(
+                f'"AppState"\n{{\n"appid" "{app_id}"\n"name" "Evil {app_id}"\n"installdir" "{install_dir}"\n}}',
+                encoding="utf-8",
+            )
+        records = [record for record in GamePlatformScanner(self.home).scan() if record.source == SourceKind.STEAM]
+        self.assertEqual(records, [])
+
     def test_heroic_bottles_playonlinux_and_orphan_are_detected(self) -> None:
         heroic = self.home / ".config/heroic"
         installed = heroic / "legendaryConfig/legendary/installed.json"

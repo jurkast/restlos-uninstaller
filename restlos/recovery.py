@@ -154,10 +154,19 @@ class RecoveryManager:
             result.errors.append("Dieses Protokoll enthält keine wiederherstellbaren Daten.")
             return result
 
+        try:
+            entries = self.trash.list_entries() if isinstance(raw_items, list) and raw_items else {}
+        except OSError as error:
+            entries = {}
+            result.errors.append(f"Papierkorb konnte nicht gelesen werden: {error}")
         changed = False
         for raw_item in raw_items if isinstance(raw_items, list) else []:
             item = self._item_from_payload(raw_item)
             if item is None or item.restored_at:
+                continue
+            # Inzwischen endgültig geleerte Einträge sind nicht mehr verfügbar – das ist kein Fehler
+            # der übrigen Wiederherstellung (die Übersicht blendet sie ebenfalls aus).
+            if entries.get(item.trash_uri) != item.original_path:
                 continue
             try:
                 self.trash.restore(item)

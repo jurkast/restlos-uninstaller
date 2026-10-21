@@ -236,6 +236,24 @@ class LocationGuiTests(unittest.TestCase):
         self.assertFalse(refresh_desktop_icon(self.root))
         self.assertFalse((self.root / "icons").exists())
 
+    def test_leftovers_page_lists_findings_and_opens_review(self) -> None:
+        from restlos.leftovers import Leftover
+        folder = self.root / "OldGame"
+        folder.mkdir()
+        self.window._leftovers_loaded([Leftover(folder, "Kein installiertes Programm gefunden – bitte prüfen", 2048, 0.0)], None)
+        self.assertEqual(self.window.nav_counts["leftovers"].get_text(), "1")
+        self.assertEqual(self.window.leftovers_size.get_text(), "2.0 KiB")
+        with patch("restlos.gui.threading.Thread"):
+            self.window._review_leftover(folder)
+        self.assertEqual(self.window.page_stack.get_visible_child_name(), "apps")
+        self.assertEqual(self.window.current_app.key, f"portable:{folder}")
+
+    def test_navigation_contains_leftovers_page(self) -> None:
+        self.assertIn("leftovers", self.window.nav_buttons)
+        with patch.object(self.window, "_load_leftovers") as load:
+            self.window.navigate("leftovers")
+        load.assert_called_once()
+
     def test_updates_page_shows_active_version_in_hero(self) -> None:
         from restlos.updater import UpdateStatus
         status = UpdateStatus(running="2.1.3", pending="", automatic=True, repository="jurkast/restlos-uninstaller",

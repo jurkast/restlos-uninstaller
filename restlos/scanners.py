@@ -214,6 +214,7 @@ class ApplicationScanner:
         roots = (
             self.home / "Applications",
             self.home / "Desktop",
+            self.home / "Schreibtisch",
             self.home / "Downloads",
             self.home / ".local/bin",
             self.home / "Games",

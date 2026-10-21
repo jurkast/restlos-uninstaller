@@ -154,6 +154,19 @@ class SafetyTests(unittest.TestCase):
         self.executor.stop_processes.assert_called_once()
         self.executor.backup.create.assert_not_called()
 
+    def test_launcher_that_stays_open_aborts_before_any_change(self):
+        from restlos.remover import RelatedProcess
+        plan = self.plan()
+        lutris = RelatedProcess(77, "lutris", True)
+        self.executor.related_processes.return_value = [lutris]
+        self.executor.stop_processes.return_value = [lutris]
+        with patch("restlos.remover.subprocess.run") as run:
+            result = self.executor.execute(plan)
+        self.assertFalse(result.success)
+        self.assertIn("lutris", result.errors[0])
+        run.assert_not_called()
+        self.assertTrue(self.data.exists())
+
     def test_change_during_backup_aborts_before_removal(self):
         plan = self.plan()
         def backup(*_args, **_kwargs):

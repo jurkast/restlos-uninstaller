@@ -159,6 +159,28 @@ class SignedUpdateTests(unittest.TestCase):
         self.assertEqual(self.updater().choose_launch(), self.base)
         self.assertEqual(self.updater().status().kind, "error")
 
+    def test_crash_before_handshake_rolls_back_immediately(self) -> None:
+        updater = self.updater(self.release("2.1.1"))
+        self.assertEqual(updater.check().pending, "2.1.1")
+        self.assertEqual(updater.choose_launch(), self.home / "versions/2.1.1")
+        self.assertTrue(updater.abandon_failed_launch("2.1.1", crashed=True))
+        status = updater.status()
+        self.assertEqual((status.pending, status.kind), ("", "rolled-back"))
+        self.assertEqual(updater.config()["blocked"], "2.1.1")
+        self.assertEqual(updater.choose_launch(), self.base)
+
+    def test_signal_or_confirmed_start_is_not_a_failure(self) -> None:
+        updater = self.updater(self.release("2.1.1"))
+        updater.check()
+        updater.choose_launch()
+        self.assertFalse(updater.abandon_failed_launch("2.1.1", crashed=False))
+        self.assertFalse((self.home / "launch-pending.json").exists())
+        self.assertEqual(updater.status().pending, "2.1.1")
+        updater.choose_launch()
+        updater.startup_ready.__func__(u.Updater(root=self.home / "versions/2.1.1", base=self.base, home=self.home))
+        self.assertFalse(updater.abandon_failed_launch("2.1.1", crashed=True))
+        self.assertEqual(updater.status().pending, "2.1.1")
+
     def test_installation_without_launcher_is_not_updated_in_app(self) -> None:
         (self.base / "run_restlos.py").unlink()
         opener = _Opener(self.release("2.1.1"))

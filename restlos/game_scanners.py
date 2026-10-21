@@ -347,7 +347,9 @@ class GamePlatformScanner:
                     app_id = values["appid"]
                     name = values["name"] or f"Steam-App {app_id}"
                     install_dir = values["installdir"]
-                    if not app_id.isdigit() or not install_dir:
+                    # installdir ist laut Steam ein einzelner Ordnername unter steamapps/common.
+                    if not app_id.isdigit() or not install_dir or install_dir in {".", ".."} or "/" in install_dir \
+                            or "\\" in install_dir or "\0" in install_dir:
                         continue
                     lowered = name.casefold()
                     if any(token in lowered for token in ("steam linux runtime", "proton", "redistributables")):
