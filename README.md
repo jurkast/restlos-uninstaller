@@ -2,11 +2,11 @@
 
 > **Safe Linux App & Game Uninstaller**
 
-[![Tests](https://github.com/jurkast/restlos/actions/workflows/ci.yml/badge.svg)](https://github.com/jurkast/restlos/actions/workflows/ci.yml)
-[![GitHub Release](https://img.shields.io/github/v/release/jurkast/restlos?include_prereleases)](https://github.com/jurkast/restlos/releases)
+[![Tests](https://github.com/jurkast/restlos-uninstaller/actions/workflows/ci.yml/badge.svg)](https://github.com/jurkast/restlos-uninstaller/actions/workflows/ci.yml)
+[![GitHub Release](https://img.shields.io/github/v/release/jurkast/restlos-uninstaller?include_prereleases)](https://github.com/jurkast/restlos-uninstaller/releases)
 [![Lizenz: MIT](https://img.shields.io/badge/Lizenz-MIT-blue.svg)](LICENSE)
 
-[English](README.en.md) · [Downloads](https://github.com/jurkast/restlos/releases) · [Fehler melden](https://github.com/jurkast/restlos/issues)
+[English](README.en.md) · [Downloads](https://github.com/jurkast/restlos-uninstaller/releases) · [Fehler melden](https://github.com/jurkast/restlos-uninstaller/issues)
 
 **Restlos Uninstaller** ist ein sicherer grafischer App- und Spiele-Deinstaller für die großen Linux-Distributionsfamilien. Die Anwendung führt Programme und Spiele aus mehreren Installationssystemen in einer Oberfläche zusammen und erstellt vor jeder Entfernung einen sichtbaren, abwählbaren Löschplan.
 
@@ -38,8 +38,8 @@
 - schreibt ein lokales Ergebnis- und Wiederherstellungsprotokoll nach `~/.local/state/restlos/history`
 - bietet zusätzlich eine Terminaloberfläche für Listen und Löschpläne
 - besitzt eine vollständige deutsche und englische Oberfläche mit Sprachwahl im Menü
-- verwendet ein gemeinsames, übersichtliches Restlos-Design mit Statuskacheln und klar getrennten Sicherheitsoptionen
-- sucht beim Start höchstens einmal täglich nach neuen Releases und bietet geprüfte Updates nach Bestätigung direkt an
+- verwendet dasselbe Restlos-Design wie Restlos Bewerbung: dunkle Petrol-Navigation, helle Karten, Mint-Akzente, Hell/Dunkel-Umschalter
+- aktualisiert sich selbst: stündliche Prüfung, Ed25519-signierte Updates, Aktivierung per „Jetzt neu starten und aktualisieren“ und automatischer Rückfall, falls eine neue Version nicht startet
 
 Restlos zeigt bewusst **Anwendungen, Spiele und eigenständige Programmumgebungen** und keine Tausenden Bibliotheks- oder Kernelpakete an.
 
@@ -56,17 +56,17 @@ Flatpak, Snap, AppImage, Wine sowie die Spieleplattformen funktionieren unabhän
 
 ## Installation
 
-Die aktuelle Ausgabe von der [Release-Seite](https://github.com/jurkast/restlos/releases) herunterladen.
+Die aktuelle Ausgabe von der [Release-Seite](https://github.com/jurkast/restlos-uninstaller/releases) herunterladen.
 
 ### Zorin OS, Ubuntu und Debian
 
 Das native Debian-Paket wird über die grafische Softwareverwaltung oder vollständig im Terminal installiert. APT installiert dabei die benötigten GTK- und Python-Abhängigkeiten automatisch:
 
 ```bash
-curl -LO https://github.com/jurkast/restlos/releases/download/v1.9.0/restlos-uninstaller_1.9.0-1_all.deb
-curl -LO https://github.com/jurkast/restlos/releases/download/v1.9.0/restlos-uninstaller_1.9.0-1_all.deb.sha256
-sha256sum --check restlos-uninstaller_1.9.0-1_all.deb.sha256
-sudo apt install ./restlos-uninstaller_1.9.0-1_all.deb
+curl -LO https://github.com/jurkast/restlos-uninstaller/releases/download/v2.1.0/restlos-uninstaller_2.1.0-1_all.deb
+curl -LO https://github.com/jurkast/restlos-uninstaller/releases/download/v2.1.0/restlos-uninstaller_2.1.0-1_all.deb.sha256
+sha256sum --check restlos-uninstaller_2.1.0-1_all.deb.sha256
+sudo apt install ./restlos-uninstaller_2.1.0-1_all.deb
 ```
 
 Der Menüeintrag startet ausdrücklich die systemweite Paketversion. Falls daneben eine ältere Benutzerinstallation unter `~/.local/bin/restlos` liegt, lautet der eindeutige Terminalpfad `/usr/bin/restlos`.
@@ -76,11 +76,11 @@ Der Menüeintrag startet ausdrücklich die systemweite Paketversion. Falls daneb
 Für Fedora, Arch Linux, openSUSE oder eine benutzerbezogene Installation:
 
 ```bash
-curl -LO https://github.com/jurkast/restlos/releases/download/v1.9.0/Restlos-1.9.0.tar.gz
-curl -LO https://github.com/jurkast/restlos/releases/download/v1.9.0/Restlos-1.9.0.sha256
-sha256sum --check Restlos-1.9.0.sha256
-tar -xzf Restlos-1.9.0.tar.gz
-cd Restlos-1.9.0
+curl -LO https://github.com/jurkast/restlos-uninstaller/releases/download/v2.1.0/Restlos-2.1.0.tar.gz
+curl -LO https://github.com/jurkast/restlos-uninstaller/releases/download/v2.1.0/Restlos-2.1.0.sha256
+sha256sum --check Restlos-2.1.0.sha256
+tar -xzf Restlos-2.1.0.tar.gz
+cd Restlos-2.1.0
 ./install.sh
 ```
 
@@ -156,23 +156,25 @@ Restlos verwendet standardmäßig die Systemsprache und unterstützt Deutsch und
 
 ## Updates
 
-Restlos fragt beim Programmstart standardmäßig höchstens einmal täglich die öffentlichen GitHub-Release-Metadaten ab. Ist eine neue Ausgabe vorhanden, erscheint eine Meldung mit Änderungshinweisen. Erst nach einem Klick auf **Herunterladen und installieren** wird das Archiv geladen, anhand des GitHub-Digests und der veröffentlichten SHA-256-Prüfsumme kontrolliert und in ein neues Versionsverzeichnis installiert. Die bisherige Version bleibt bei einem Fehler startfähig.
+Restlos aktualisiert sich nach demselben Verfahren wie Restlos Bewerbung:
 
-Unter **Menü → Automatisch nach Updates suchen** lässt sich die Startprüfung abschalten. **Menü → Nach Updates suchen …** prüft unabhängig vom Zeitintervall sofort. Restlos installiert keine Aktualisierung ohne ausdrückliche Bestätigung.
+1. Kurz nach dem Start und danach stündlich lädt Restlos die kleine Update-Beschreibung `restlos-update.json` samt Signatur aus dem neuesten GitHub-Release.
+2. Die Signatur wird mit dem öffentlichen Ed25519-Schlüssel der **installierten** Version geprüft. Erst dann wird das Archiv geladen und anhand von Größe und SHA-256 kontrolliert.
+3. Die geprüfte Version wird in `~/.local/share/restlos-uninstaller-updates/versions/` vorbereitet – ohne Passwort und ohne Eingriff in Systempakete.
+4. Rechts unten erscheint **Jetzt neu starten und aktualisieren**. Alternativ startet die neue Version automatisch beim nächsten Öffnen.
+5. Startet eine neue Version nicht bis zum Fenster, schaltet Restlos beim nächsten Start automatisch zurück und überspringt nur diese eine Version.
 
-Der Installer ist weiterhin versionsbasiert und kann auch manuell ausgeführt werden. Eine neue lokale Ausgabe wird so installiert:
+Unter **Updates & Startcheck** lassen sich die automatische Prüfung abschalten, sofort prüfen oder zur vorherigen Version zurückschalten. Protokolle, Wiederherstellungsdaten und Einstellungen bleiben bei jedem Update unverändert.
+
+**Einmalig für Versionen bis 2.0:** Ältere Ausgaben kennen das signierte Verfahren noch nicht. Version 2.1.0 deshalb einmal über das Debian-Paket oder `install.sh` installieren – danach kommen alle weiteren Updates automatisch.
+
+Neue Releases entstehen automatisch, sobald Programmänderungen auf `main` landen (siehe `.github/workflows/release.yml`). Einmalig muss dafür unter *Settings → Secrets and variables → Actions* das Secret `RESTLOS_SIGNING_KEY` mit demselben privaten Schlüssel wie bei Restlos Bewerbung angelegt werden.
+
+Manuell bleibt der versionsbasierte Installer weiterhin nutzbar:
 
 ```bash
-./update.sh /pfad/zu/Restlos-1.9.0.tar.gz
+./update.sh /pfad/zu/Restlos-2.1.0.tar.gz
 ```
-
-Für ein über HTTPS geladenes Release ist eine bekannte SHA-256-Prüfsumme Pflicht:
-
-```bash
-./update.sh 'https://github.com/jurkast/restlos/releases/download/v1.9.0/Restlos-1.9.0.tar.gz' '64-stellige-sha256-prüfsumme'
-```
-
-Updates werden zuerst in ein neues Versionsverzeichnis kopiert und geprüft. Erst danach wird der `current`-Symlink atomar umgeschaltet. Einstellungen und Entfernungshistorie bleiben erhalten.
 
 ## Restlos selbst entfernen
 

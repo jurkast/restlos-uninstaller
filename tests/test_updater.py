@@ -3,288 +3,217 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
+import shutil
 import subprocess
 import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
+from urllib.error import HTTPError
+from urllib.request import Request
 
-from restlos.updater import (
-    CHECK_INTERVAL_SECONDS,
-    RETRY_INTERVAL_SECONDS,
-    ReleaseInfo,
-    UpdateClient,
-    UpdateError,
-    UpdateState,
-    checksum_from_file,
-    extract_release_archive,
-    is_system_managed_install,
-    parse_version,
-    RELEASES_APIS,
-    select_update,
-)
+from restlos import updater as u
 
 
-def release_payload(
-    version: str,
-    *,
-    draft: bool = False,
-    prerelease: bool = True,
-    repository: str = "jurkast/restlos",
-) -> dict[str, object]:
-    archive_name = f"Restlos-{version}.tar.gz"
-    prefix = f"https://github.com/{repository}/releases/download/v{version}"
-    return {
-        "tag_name": f"v{version}",
-        "name": f"Restlos {version} (Beta)",
-        "body": "Neue Funktionen",
-        "draft": draft,
-        "prerelease": prerelease,
-        "assets": [
-            {
-                "name": archive_name,
-                "state": "uploaded",
-                "size": 1234,
-                "digest": "sha256:" + "a" * 64,
-                "browser_download_url": f"{prefix}/{archive_name}",
-            },
-            {
-                "name": f"Restlos-{version}.sha256",
-                "state": "uploaded",
-                "size": 87,
-                "browser_download_url": f"{prefix}/Restlos-{version}.sha256",
-            },
-        ],
-    }
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+HAS_OPENSSL = shutil.which("openssl") is not None
 
 
-class FakeResponse:
-    def __init__(self, content: bytes, url: str) -> None:
-        self.stream = io.BytesIO(content)
-        self.url = url
-
-    def read(self, size: int = -1) -> bytes:
-        return self.stream.read(size)
-
-    def geturl(self) -> str:
-        return self.url
-
-    def close(self) -> None:
-        self.stream.close()
+def _program(root: Path, version: str) -> Path:
+    (root / "restlos").mkdir(parents=True, exist_ok=True)
+    (root / "restlos/__init__.py").write_text(f'__version__ = "{version}"\n', encoding="utf-8")
+    for name in ("cli.py", "gui.py", "updater.py"):
+        (root / "restlos" / name).write_text("# test\n", encoding="utf-8")
+    (root / "run_restlos.py").write_text("# test\n", encoding="utf-8")
+    return root
 
 
-class UpdaterTests(unittest.TestCase):
+class _Response(io.BytesIO):
+    def __enter__(self) -> "_Response":
+        return self
+
+
+class _Opener:
+    def __init__(self, files: dict[str, bytes]) -> None:
+        self.files = files
+        self.requested: list[str] = []
+
+    def open(self, request: Request, timeout: float) -> Any:
+        url = request.full_url
+        self.requested.append(url)
+        name = url.rsplit("/", 1)[-1]
+        if name not in self.files:
+            raise HTTPError(url, 404, "not found", {}, None)  # type: ignore[arg-type]
+        return _Response(self.files[name])
+
+
+@unittest.skipUnless(HAS_OPENSSL, "OpenSSL wird für die Signaturprüfung benötigt")
+class SignedUpdateTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
-        self.root = Path(self.temporary.name)
+        self.temporary = tempfile.TemporaryDirectory(prefix="restlos-update-test-")
+        self.work = Path(self.temporary.name)
+        self.base = _program(self.work / "base", "2.1.0")
+        self.key = self.work / "private.pem"
+        subprocess.run(["openssl", "genpkey", "-algorithm", "ED25519", "-out", str(self.key)], check=True,
+                       capture_output=True)
+        subprocess.run(["openssl", "pkey", "-in", str(self.key), "-pubout", "-out",
+                        str(self.base / "restlos" / u.PUBLIC_KEY_NAME)], check=True, capture_output=True)
+        self.home = self.work / "updates"
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def test_version_parser_is_strict(self) -> None:
-        self.assertEqual(parse_version("v1.2.3"), (1, 2, 3))
-        with self.assertRaises(ValueError):
-            parse_version("1.2")
-        with self.assertRaises(ValueError):
-            parse_version("1.2.3-beta")
+    def release(self, version: str, *, unsafe: bool = False, wrong_version: bool = False,
+                minimum_base: str = "2.0.0") -> dict[str, bytes]:
+        source = _program(self.work / f"src-{version}" / f"Restlos-{version}", "9.9.9" if wrong_version else version)
+        archive = self.work / f"Restlos-{version}.tar.gz"
+        with tarfile.open(archive, "w:gz") as tar:
+            tar.add(source, arcname=f"Restlos-{version}")
+            if unsafe:
+                data = b"bad"
+                info = tarfile.TarInfo("../escape.txt")
+                info.size = len(data)
+                tar.addfile(info, io.BytesIO(data))
+        payload = archive.read_bytes()
+        manifest = {
+            "application": u.APPLICATION, "architecture": "all", "version": version,
+            "minimum_base": minimum_base, "archive": archive.name, "size": len(payload),
+            "sha256": hashlib.sha256(payload).hexdigest(),
+        }
+        manifest_path = self.work / f"manifest-{version}.json"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        signature_path = self.work / f"manifest-{version}.sig"
+        subprocess.run(["openssl", "pkeyutl", "-sign", "-inkey", str(self.key), "-rawin", "-in",
+                        str(manifest_path), "-out", str(signature_path)], check=True, capture_output=True)
+        return {u.MANIFEST_NAME: manifest_path.read_bytes(), u.SIGNATURE_NAME: signature_path.read_bytes(),
+                archive.name: payload}
 
-    def test_system_managed_install_channels_are_explicit(self) -> None:
-        self.assertTrue(is_system_managed_install({"RESTLOS_UPDATE_CHANNEL": "deb"}))
-        self.assertTrue(is_system_managed_install({"RESTLOS_UPDATE_CHANNEL": " SNAP "}))
-        self.assertFalse(is_system_managed_install({}))
-        self.assertFalse(is_system_managed_install({"RESTLOS_UPDATE_CHANNEL": "portable"}))
+    def updater(self, files: dict[str, bytes] | None = None, root: Path | None = None) -> u.Updater:
+        return u.Updater(root=root or self.base, base=self.base, home=self.home, opener=_Opener(files or {}),
+                         clock=lambda: 1_000.0)
 
-    def test_highest_complete_release_is_selected(self) -> None:
-        incomplete = release_payload("1.5.0")
-        incomplete["assets"] = []
-        selected = select_update(
-            [release_payload("1.3.0"), incomplete, release_payload("1.4.0"), release_payload("9.0.0", draft=True)],
-            "1.2.0",
-        )
-        self.assertIsNotNone(selected)
-        self.assertEqual(selected.version, "1.4.0")
-        self.assertEqual(selected.archive_digest, "a" * 64)
+    def test_check_stages_signed_update_and_launch_handshake(self) -> None:
+        files = self.release("2.2.0")
+        status = self.updater(files).check()
+        self.assertEqual((status.kind, status.version, status.pending), ("ready", "2.2.0", "2.2.0"))
+        staged = self.home / "versions/2.2.0"
+        self.assertTrue((staged / "release.sig").is_file())
+        self.assertEqual(staged.stat().st_mode & 0o777, 0o700)
 
-    def test_no_downgrade_or_same_version(self) -> None:
-        self.assertIsNone(select_update([release_payload("1.2.0"), release_payload("1.1.0")], "1.2.0"))
+        launcher = self.updater()
+        self.assertEqual(launcher.choose_launch(), staged)
+        self.assertTrue((self.home / "launch-pending.json").exists())
+        self.updater(root=staged).startup_ready()
+        self.assertFalse((self.home / "launch-pending.json").exists())
+        # Erneute Prüfung lädt nichts doppelt.
+        opener = _Opener(files)
+        again = u.Updater(root=self.base, base=self.base, home=self.home, opener=opener).check()
+        self.assertEqual(again.kind, "ready")
+        self.assertEqual(len(opener.requested), 2)
 
-    def test_legacy_repository_release_is_accepted_during_username_migration(self) -> None:
-        selected = select_update(
-            [release_payload("1.4.2", repository="jurkastl/restlos")],
-            "1.4.1",
-        )
-        self.assertIsNotNone(selected)
-        self.assertEqual(selected.version, "1.4.2")
-        self.assertEqual(selected.page_url, "https://github.com/jurkastl/restlos/releases/tag/v1.4.2")
+    def test_failed_start_rolls_back_and_blocks_only_that_version(self) -> None:
+        self.updater(self.release("2.2.0")).check()
+        u._write_json(self.home / "launch-pending.json", {"version": "2.2.0", "pid": 2**30})
+        launcher = self.updater()
+        self.assertEqual(launcher.choose_launch(), self.base)
+        self.assertFalse((self.home / "current.json").exists())
+        self.assertTrue(launcher.config()["automatic"])
+        self.assertEqual(launcher.config()["blocked"], "2.2.0")
+        self.assertEqual(self.updater(self.release("2.2.0")).check().kind, "blocked")
+        # Die nächste, korrigierte Version kommt wieder automatisch.
+        self.assertEqual(self.updater(self.release("2.2.1")).check().kind, "ready")
 
-    def test_release_from_unrelated_repository_is_rejected(self) -> None:
-        self.assertIsNone(
-            select_update(
-                [release_payload("1.4.2", repository="someone-else/restlos")],
-                "1.4.1",
-            )
-        )
+    def test_running_instance_is_not_a_failed_start(self) -> None:
+        self.updater(self.release("2.2.0")).check()
+        u._write_json(self.home / "launch-pending.json", {"version": "2.2.0", "pid": os.getpid()})
+        self.assertEqual(self.updater().choose_launch(), self.base)
+        self.assertTrue((self.home / "current.json").exists())
 
-    def test_checksum_must_name_exact_archive(self) -> None:
-        content = ("b" * 64 + "  Restlos-1.3.0.tar.gz\n").encode("ascii")
-        self.assertEqual(checksum_from_file(content, "Restlos-1.3.0.tar.gz"), "b" * 64)
-        with self.assertRaises(UpdateError):
-            checksum_from_file(content, "Restlos-1.4.0.tar.gz")
+    def test_tampered_signature_hash_and_paths_are_rejected(self) -> None:
+        files = self.release("2.2.0")
+        files[u.SIGNATURE_NAME] = b"0" * 64
+        status = self.updater(files).check()
+        self.assertEqual(status.kind, "error")
+        self.assertIn("Signatur", status.detail)
 
-    def test_state_uses_daily_success_and_shorter_failure_retry(self) -> None:
-        state = UpdateState(self.root / "update.json")
-        self.assertTrue(state.automatic_checks_enabled())
-        self.assertTrue(state.is_due(now=1000))
-        state.record_attempt(True, now=1000)
-        self.assertFalse(state.is_due(now=1000 + CHECK_INTERVAL_SECONDS - 1))
-        self.assertTrue(state.is_due(now=1000 + CHECK_INTERVAL_SECONDS))
-        state.record_attempt(False, now=200_000)
-        self.assertFalse(state.is_due(now=200_000 + RETRY_INTERVAL_SECONDS - 1))
-        self.assertTrue(state.is_due(now=200_000 + RETRY_INTERVAL_SECONDS))
+        files = self.release("2.2.0")
+        files["Restlos-2.2.0.tar.gz"] += b"x"
+        self.assertEqual(self.updater(files).check().kind, "error")
 
-    def test_automatic_checks_can_be_disabled(self) -> None:
-        state = UpdateState(self.root / "update.json")
-        state.set_automatic_checks(False)
-        self.assertFalse(state.automatic_checks_enabled())
-        self.assertFalse(state.is_due(now=1000))
+        status = self.updater(self.release("2.3.0", unsafe=True)).check()
+        self.assertEqual(status.kind, "error")
+        self.assertFalse((self.work / "escape.txt").exists())
+        self.assertFalse((self.home / "current.json").exists())
 
-    def test_client_reads_public_release_metadata(self) -> None:
-        content = json.dumps([release_payload("1.3.0")]).encode("utf-8")
+    def test_version_mismatch_and_minimum_base(self) -> None:
+        self.assertEqual(self.updater(self.release("2.2.0", wrong_version=True)).check().kind, "error")
+        status = self.updater(self.release("3.0.0", minimum_base="3.0.0")).check()
+        self.assertEqual(status.kind, "error")
+        self.assertIn("Installationspaket", status.detail)
 
-        def opener(request, **_kwargs):
-            return FakeResponse(content, request.full_url)
+    def test_tampered_staged_copy_is_not_started(self) -> None:
+        self.updater(self.release("2.2.0")).check()
+        (self.home / "versions/2.2.0/release.json").write_text("{}", encoding="utf-8")
+        self.assertEqual(self.updater().choose_launch(), self.base)
+        self.assertEqual(self.updater().status().kind, "error")
 
-        selected = UpdateClient("1.2.0", opener=opener).check()
-        self.assertIsNotNone(selected)
-        self.assertEqual(selected.version, "1.3.0")
+    def test_installation_without_launcher_is_not_updated_in_app(self) -> None:
+        (self.base / "run_restlos.py").unlink()
+        opener = _Opener(self.release("2.1.1"))
+        status = u.Updater(root=self.base, base=self.base, home=self.home, opener=opener, clock=lambda: 1.0).check()
+        self.assertEqual(status.kind, "error")
+        self.assertIn("pip", status.detail)
+        self.assertEqual(opener.requested, [])
+        self.assertFalse((self.home / "versions").exists())
 
-    def test_client_falls_back_to_legacy_namespace_before_username_change(self) -> None:
-        content = json.dumps([release_payload("1.4.2", repository="jurkastl/restlos")]).encode("utf-8")
-        requested: list[str] = []
+    def test_current_and_offline(self) -> None:
+        self.assertEqual(self.updater(self.release("2.1.0")).check().kind, "current")
+        status = self.updater({}).check()
+        self.assertEqual(status.kind, "error")
+        self.assertTrue(self.updater().status().automatic)
 
-        def opener(request, **_kwargs):
-            requested.append(request.full_url)
-            if request.full_url == RELEASES_APIS[0]:
-                raise OSError("new namespace is not active yet")
-            return FakeResponse(content, request.full_url)
+    def test_newer_base_install_wins_and_old_versions_are_pruned(self) -> None:
+        self.updater(self.release("2.2.0")).check()
+        self.updater(self.release("2.3.0")).check()
+        (self.home / "versions/2.1.5").mkdir()
+        removed = self.updater().prune_versions()
+        self.assertEqual(removed, ["2.1.5"])
+        self.assertTrue((self.home / "versions/2.2.0").is_dir())
+        newer_base = _program(self.work / "newbase", "2.4.0")
+        shutil.copy2(self.base / "restlos" / u.PUBLIC_KEY_NAME, newer_base / "restlos" / u.PUBLIC_KEY_NAME)
+        launcher = u.Updater(root=newer_base, base=newer_base, home=self.home, opener=_Opener({}))
+        self.assertEqual(launcher.choose_launch(), newer_base)
 
-        selected = UpdateClient("1.4.1", opener=opener).check()
-        self.assertIsNotNone(selected)
-        self.assertEqual(selected.version, "1.4.2")
-        self.assertEqual(requested, list(RELEASES_APIS))
 
-    def test_client_checks_legacy_namespace_when_new_namespace_has_no_release(self) -> None:
-        legacy_content = json.dumps([release_payload("1.4.2", repository="jurkastl/restlos")]).encode("utf-8")
+class UpdateHelperTests(unittest.TestCase):
+    def test_trusted_urls(self) -> None:
+        self.assertTrue(u.trusted_url("https://github.com/jurkast/restlos-uninstaller/releases/latest/download/x"))
+        self.assertTrue(u.trusted_url("https://release-assets.githubusercontent.com/x"))
+        self.assertFalse(u.trusted_url("http://github.com/x"))
+        self.assertFalse(u.trusted_url("https://evil.example/x"))
+        self.assertFalse(u.trusted_url("https://user:pw@github.com/x"))
 
-        def opener(request, **_kwargs):
-            content = b"[]" if request.full_url == RELEASES_APIS[0] else legacy_content
-            return FakeResponse(content, request.full_url)
+    def test_repository_setting_is_validated(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            updater = u.Updater(home=Path(temporary))
+            self.assertEqual(updater.config()["repository"], u.DEFAULT_REPOSITORY)
+            with self.assertRaises(u.UpdateError):
+                updater.save_config(repository="../evil")
+            updater.save_config(automatic=False)
+            self.assertFalse(updater.config()["automatic"])
+            self.assertEqual((Path(temporary) / "settings.json").stat().st_mode & 0o777, 0o600)
 
-        selected = UpdateClient("1.4.1", opener=opener).check()
-        self.assertIsNotNone(selected)
-        self.assertEqual(selected.version, "1.4.2")
-
-    def test_untrusted_redirect_is_rejected(self) -> None:
-        def opener(_request, **_kwargs):
-            return FakeResponse(b"[]", "https://example.invalid/releases")
-
-        with self.assertRaises(UpdateError):
-            UpdateClient("1.2.0", opener=opener).check()
-
-    def test_safe_archive_is_extracted(self) -> None:
-        archive = self.root / "release.tar.gz"
-        with tarfile.open(archive, "w:gz") as bundle:
-            data = b"#!/bin/sh\n"
-            info = tarfile.TarInfo("Restlos-1.3.0/install.sh")
-            info.mode = 0o755
-            info.size = len(data)
-            bundle.addfile(info, io.BytesIO(data))
-        release_home = extract_release_archive(archive, self.root / "extract", "1.3.0")
-        self.assertTrue((release_home / "install.sh").is_file())
-        self.assertTrue((release_home / "install.sh").stat().st_mode & 0o111)
-
-    def test_archive_path_traversal_is_rejected(self) -> None:
-        archive = self.root / "unsafe.tar.gz"
-        with tarfile.open(archive, "w:gz") as bundle:
-            data = b"bad"
-            info = tarfile.TarInfo("Restlos-1.3.0/../../outside")
-            info.size = len(data)
-            bundle.addfile(info, io.BytesIO(data))
-        with self.assertRaises(UpdateError):
-            extract_release_archive(archive, self.root / "unsafe-extract", "1.3.0")
-        self.assertFalse((self.root / "outside").exists())
-
-    def test_archive_links_are_rejected(self) -> None:
-        archive = self.root / "link.tar.gz"
-        with tarfile.open(archive, "w:gz") as bundle:
-            info = tarfile.TarInfo("Restlos-1.3.0/link")
-            info.type = tarfile.SYMTYPE
-            info.linkname = "/etc/passwd"
-            bundle.addfile(info)
-        with self.assertRaises(UpdateError):
-            extract_release_archive(archive, self.root / "link-extract", "1.3.0")
-
-    def test_install_rejects_mismatching_github_and_checksum_digests(self) -> None:
-        checksum = ("b" * 64 + "  Restlos-1.3.0.tar.gz\n").encode("ascii")
-
-        def opener(request, **_kwargs):
-            return FakeResponse(checksum, request.full_url)
-
-        release = ReleaseInfo(
-            version="1.3.0",
-            title="Restlos 1.3.0",
-            notes="",
-            page_url="https://github.com/jurkastl/restlos/releases/tag/v1.3.0",
-            archive_url="https://github.com/jurkastl/restlos/releases/download/v1.3.0/Restlos-1.3.0.tar.gz",
-            checksum_url="https://github.com/jurkastl/restlos/releases/download/v1.3.0/Restlos-1.3.0.sha256",
-            archive_digest="a" * 64,
-            archive_size=1,
-            prerelease=True,
-        )
-        with self.assertRaises(UpdateError):
-            UpdateClient("1.2.0", opener=opener).install(release)
-
-    def test_verified_archive_runs_installer_and_final_version_check(self) -> None:
-        archive_buffer = io.BytesIO()
-        with tarfile.open(fileobj=archive_buffer, mode="w:gz") as bundle:
-            data = b"#!/bin/sh\nexit 0\n"
-            info = tarfile.TarInfo("Restlos-1.3.0/install.sh")
-            info.mode = 0o755
-            info.size = len(data)
-            bundle.addfile(info, io.BytesIO(data))
-        archive = archive_buffer.getvalue()
-        digest = hashlib.sha256(archive).hexdigest()
-        checksum = f"{digest}  Restlos-1.3.0.tar.gz\n".encode("ascii")
-        archive_url = "https://github.com/jurkastl/restlos/releases/download/v1.3.0/Restlos-1.3.0.tar.gz"
-        checksum_url = "https://github.com/jurkastl/restlos/releases/download/v1.3.0/Restlos-1.3.0.sha256"
-
-        def opener(request, **_kwargs):
-            content = checksum if request.full_url == checksum_url else archive
-            return FakeResponse(content, request.full_url)
-
-        commands: list[list[str]] = []
-
-        def runner(command, **_kwargs):
-            commands.append(command)
-            if command[-1] == "--version":
-                return subprocess.CompletedProcess(command, 0, "Restlos 1.3.0\n", "")
-            return subprocess.CompletedProcess(command, 0, "Installation abgeschlossen.\n", "")
-
-        release = ReleaseInfo(
-            version="1.3.0",
-            title="Restlos 1.3.0",
-            notes="",
-            page_url="https://github.com/jurkastl/restlos/releases/tag/v1.3.0",
-            archive_url=archive_url,
-            checksum_url=checksum_url,
-            archive_digest=digest,
-            archive_size=len(archive),
-            prerelease=True,
-        )
-        result = UpdateClient("1.2.0", opener=opener, runner=runner).install(release, home=self.root)
-        self.assertEqual(result.version, "1.3.0")
-        self.assertTrue(commands[0][0].endswith("/Restlos-1.3.0/install.sh"))
-        self.assertEqual(commands[1], [str(self.root / ".local/bin/restlos"), "--version"])
+    def test_project_ships_public_key_and_default_repository(self) -> None:
+        key = (PROJECT_ROOT / "restlos" / u.PUBLIC_KEY_NAME).read_text(encoding="ascii")
+        self.assertIn("BEGIN PUBLIC KEY", key)
+        self.assertNotIn("PRIVATE", key)
+        self.assertEqual(u.DEFAULT_REPOSITORY, "jurkast/restlos-uninstaller")
+        self.assertEqual(u.version_of(PROJECT_ROOT), __import__("restlos").__version__)
+        pyproject = (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        self.assertIn("update-public.pem", pyproject)
+        self.assertIn("icon.svg", pyproject)
 
 
 if __name__ == "__main__":

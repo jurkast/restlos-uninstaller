@@ -35,8 +35,8 @@ class LocationGuiTests(unittest.TestCase):
         self.addCleanup(self.window.destroy)
 
     def test_application_initialization_supports_baseline_gtk_and_glib(self) -> None:
-        with patch("restlos.gui.UpdateState") as state, patch("restlos.gui.LanguageSettings") as settings:
-            state.return_value.automatic_checks_enabled.return_value = False
+        with patch("restlos.gui.Updater") as updater, patch("restlos.gui.LanguageSettings") as settings:
+            updater.return_value.config.return_value = {"automatic": False, "repository": "x/y", "blocked": ""}
             settings.return_value.selected.return_value = "system"
             application = RestlosApplication()
         self.assertEqual(application.get_flags(), Gio.ApplicationFlags(0))
@@ -205,6 +205,44 @@ class LocationGuiTests(unittest.TestCase):
         self.window._analysis_loaded(None, "test error")
         self.assertTrue(self.window.locations_button.get_sensitive())
         self.assertFalse(self.window.remove_button.get_sensitive())
+
+    def test_selection_during_analysis_is_analyzed_afterwards(self) -> None:
+        first = AppRecord("portable:a", "Erstes", SourceKind.PORTABLE, "a")
+        second = AppRecord("portable:b", "Zweites", SourceKind.PORTABLE, "b")
+        self.window._applications_loaded([first, second], None)
+        rows = [self.window.app_list.get_row_at_index(index) for index in (0, 1)]
+        with patch("restlos.gui.threading.Thread"):
+            self.window.app_list.select_row(rows[0])
+            self.assertTrue(self.window.busy)
+            # Klick auf eine andere Anwendung, während die erste noch analysiert wird.
+            self.window.app_list.select_row(rows[1])
+            self.assertEqual(self.window.current_app.key, first.key)
+            self.assertFalse(self.window.remove_button.get_sensitive())
+            stale = RemovalPlan(first)
+            self.window._analysis_loaded(stale, None)
+        # Der alte Plan wird nicht übernommen, die markierte Anwendung wird analysiert.
+        self.assertEqual(self.window.current_app.key, second.key)
+        self.assertIsNone(self.window.current_plan)
+        self.assertTrue(self.window.busy)
+        self.assertEqual(self.window.detail_name.get_text(), "Zweites")
+
+    def test_old_desktop_icon_is_replaced_once(self) -> None:
+        from restlos.gui import ICON_PATH, refresh_desktop_icon
+        pixmap = self.root / "pixmaps/io.github.jurkast.Restlos.svg"
+        pixmap.parent.mkdir(parents=True)
+        pixmap.write_text("<svg>alt</svg>", encoding="utf-8")
+        self.assertTrue(refresh_desktop_icon(self.root))
+        self.assertEqual(pixmap.read_bytes(), ICON_PATH.read_bytes())
+        self.assertFalse(refresh_desktop_icon(self.root))
+        self.assertFalse((self.root / "icons").exists())
+
+    def test_updates_page_shows_active_version_in_hero(self) -> None:
+        from restlos.updater import UpdateStatus
+        status = UpdateStatus(running="2.1.3", pending="", automatic=True, repository="jurkast/restlos-uninstaller",
+                              kind="current", version="2.1.3", detail="", checked=None)
+        self.window.show_update_status(status)
+        self.assertEqual(self.window.update_hero_version.get_text(), "2.1.3")
+        self.assertFalse(self.window.update_restart_button.get_visible())
 
 
 if __name__ == "__main__":

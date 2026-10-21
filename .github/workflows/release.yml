@@ -1,9 +1,26 @@
+# Baut, signiert und veröffentlicht Restlos Uninstaller automatisch – wie Restlos Bewerbung:
+#  - Version in restlos/__init__.py von Hand erhöht (z. B. 2.2.0) → genau diese Version erscheint.
+#  - Programm geändert, Version aber nicht erhöht → Patch-Nummer steigt automatisch
+#    (2.1.0 → 2.1.1), wird auf main festgehalten und veröffentlicht.
+#  - Nur Doku/Tests/Workflows geändert → kein Release.
+# Installierte Programme finden das Update stündlich selbst und bieten
+# „Jetzt neu starten und aktualisieren“ an.
+#
+# Einmalig einrichten: Settings → Secrets and variables → Actions → New repository secret
+#   Name:  RESTLOS_SIGNING_KEY
+#   Wert:  vollständiger Inhalt des privaten Ed25519-Schlüssels (private.pem) inkl. BEGIN/END-Zeilen –
+#          derselbe Schlüssel wie bei Restlos Bewerbung.
 name: Release
 
 on:
   push:
-    tags:
-      - "v*.*.*"
+    branches: [main]
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -11,62 +28,120 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-24.04
-
     steps:
       - name: Quellcode auschecken
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Version bestimmen
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="$(python3 scripts/release_version.py current)"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "${GITHUB_REF_NAME}" != "v$VERSION" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} passt nicht zur Programmversion $VERSION."; exit 1
+          fi
+          LATEST="$(gh release view --json tagName --jq .tagName 2>/dev/null | sed 's/^v//' || true)"
+          if ! gh release view "v$VERSION" >/dev/null 2>&1; then
+            echo "Neue Version $VERSION."
+            { echo "build=true"; echo "version=$VERSION"; echo "since=$LATEST"; } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          CHANGED="$(git diff --name-only "v$VERSION" HEAD -- . ':(exclude)*.md' ':(exclude)tests/**' ':(exclude).github/**' ':(exclude).gitignore' || true)"
+          if [ -z "$CHANGED" ]; then
+            echo "::notice::Keine Programmänderung seit v$VERSION – kein neues Release."
+            echo "build=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "Geänderte Programmdateien:"; echo "$CHANGED"
+          NEXT="$(python3 scripts/release_version.py next-patch)"
+          while gh release view "v$NEXT" >/dev/null 2>&1; do
+            NEXT="$(python3 -c 'import sys;a,b,c=map(int,sys.argv[1].split("."));print(f"{a}.{b}.{c+1}")' "$NEXT")"
+          done
+          python3 scripts/release_version.py set "$NEXT"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "Version $NEXT (automatisches Release)"
+          git push origin HEAD:main
+          { echo "build=true"; echo "version=$NEXT"; echo "since=$VERSION"; } >> "$GITHUB_OUTPUT"
+
+      - name: Signierschlüssel vorhanden?
+        if: steps.version.outputs.build == 'true'
+        env:
+          SIGNING_KEY: ${{ secrets.RESTLOS_SIGNING_KEY }}
+        run: |
+          if [ -z "$SIGNING_KEY" ]; then
+            echo "::error::Secret RESTLOS_SIGNING_KEY fehlt (Settings → Secrets and variables → Actions)."; exit 1
+          fi
 
       - name: Systemabhängigkeiten installieren
+        if: steps.version.outputs.build == 'true'
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes appstream desktop-file-utils gir1.2-gtk-4.0 python3-gi dbus-x11 xvfb
-
-      - name: Tag und Projektversion vergleichen
-        run: |
-          version="$(python3 -I -B -c 'import pathlib,re; text=pathlib.Path("restlos/__init__.py").read_text(); print(re.search(r"^__version__ = \"([^\"]+)\"", text, re.M).group(1))')"
-          test "$GITHUB_REF_NAME" = "v${version}"
+          sudo apt-get update -qq
+          sudo apt-get install --yes -qq appstream desktop-file-utils gir1.2-gtk-4.0 python3-gi dbus-x11 xvfb openssl
 
       - name: Vollständige Prüfung
+        if: steps.version.outputs.build == 'true'
+        env:
+          GTK_A11Y: none
         run: |
-          python3 -m compileall -q restlos tests
+          python3 -m compileall -q restlos tests scripts
           bash -n install.sh update.sh uninstall.sh scripts/build-deb.sh scripts/build-release.sh
           dbus-run-session -- xvfb-run -a python3 -m unittest discover -s tests -v
 
-      - name: Release-Dateien erzeugen
+      - name: Release-Dateien bauen und signieren
+        if: steps.version.outputs.build == 'true'
+        env:
+          SIGNING_KEY: ${{ secrets.RESTLOS_SIGNING_KEY }}
         run: |
           export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
           ./scripts/build-release.sh dist
           ./scripts/build-deb.sh dist
+          KEY="$RUNNER_TEMP/private.pem"
+          (umask 077; printf '%s\n' "$SIGNING_KEY" > "$KEY")
+          python3 scripts/sign_update.py dist "$KEY"
+          rm -f "$KEY"
           cd dist
           sha256sum --check Restlos-*.sha256
           sha256sum --check restlos-uninstaller_*_all.deb.sha256
-          dpkg-deb --info restlos-uninstaller_*_all.deb
+          ls -la
 
-      - name: GitHub-Release veröffentlichen
+      - name: Release-Notizen aus dem Änderungsprotokoll
+        if: steps.version.outputs.build == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          SINCE: ${{ steps.version.outputs.since }}
+        run: |
+          python3 - <<'PY'
+          import os, re, subprocess
+          version, since = os.environ["VERSION"], os.environ["SINCE"]
+          text = open("CHANGELOG.md", encoding="utf-8").read()
+          match = re.search(r"^## " + re.escape(version) + r"\b.*?(?=^## |\Z)", text, re.S | re.M)
+          if match:
+              notes = match.group(0).strip()
+          else:
+              span = f"v{since}..HEAD" if since else "HEAD~20..HEAD"
+              log = subprocess.run(["git", "log", "--no-merges", "--pretty=- %s", span], capture_output=True, text=True).stdout
+              lines = [line for line in log.splitlines() if "automatisches Release" not in line]
+              notes = f"## {version}\n\n" + ("\n".join(lines) or "- Verbesserungen und Fehlerbehebungen")
+          notes += ("\n\nInstallierte Versionen ab 2.1 aktualisieren sich selbst (signiert geprüft) – "
+                    "einfach „Jetzt neu starten und aktualisieren“ wählen.")
+          open("RELEASE-NOTES.md", "w", encoding="utf-8").write(notes + "\n")
+          PY
+
+      - name: Auf GitHub veröffentlichen
+        if: steps.version.outputs.build == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          V: ${{ steps.version.outputs.version }}
         run: |
-          version="${GITHUB_REF_NAME#v}"
-          archive="dist/Restlos-${version}.tar.gz"
-          checksum="dist/Restlos-${version}.sha256"
-          deb="dist/restlos-uninstaller_${version}-1_all.deb"
-          deb_checksum="${deb}.sha256"
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1
-          then
-            gh release upload "$GITHUB_REF_NAME" \
-              "$archive" \
-              "$checksum" \
-              "$deb" \
-              "$deb_checksum" \
-              --clobber
-          else
-            gh release create "$GITHUB_REF_NAME" \
-              "$archive" \
-              "$checksum" \
-              "$deb" \
-              "$deb_checksum" \
-              --verify-tag \
-              --prerelease \
-              --generate-notes \
-              --title "Restlos Uninstaller ${version} (Beta)"
-          fi
+          gh release create "v$V" --target "$(git rev-parse HEAD)" \
+            "dist/Restlos-$V.tar.gz" "dist/Restlos-$V.sha256" \
+            "dist/restlos-uninstaller_${V}-1_all.deb" "dist/restlos-uninstaller_${V}-1_all.deb.sha256" \
+            dist/restlos-update.json dist/restlos-update.sig \
+            --title "Restlos Uninstaller $V" --notes-file RELEASE-NOTES.md --latest
+
+      - name: Schlüssel sicher entfernen
+        if: always()
+        run: rm -f "$RUNNER_TEMP/private.pem"

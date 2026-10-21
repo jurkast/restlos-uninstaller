@@ -5,8 +5,8 @@ Priority: optional
 Architecture: all
 Installed-Size: @INSTALLED_SIZE@
 Maintainer: jurkast <jurkast@users.noreply.github.com>
-Homepage: https://github.com/jurkast/restlos
-Depends: python3 (>= 3.10), python3-gi, gir1.2-gtk-4.0, policykit-1, hicolor-icon-theme
+Homepage: https://github.com/jurkast/restlos-uninstaller
+Depends: python3 (>= 3.10), python3-gi, gir1.2-gtk-4.0, policykit-1, hicolor-icon-theme, openssl
 Recommends: desktop-file-utils
 Provides: restlos
 Description: Safe Linux App & Game Uninstaller

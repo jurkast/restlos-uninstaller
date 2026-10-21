@@ -5,15 +5,16 @@ Maintainer: jurkast <312310339+jurkast@users.noreply.github.com>
 Build-Depends: debhelper-compat (= 13)
 Standards-Version: 4.6.2
 Rules-Requires-Root: no
-Homepage: https://github.com/jurkast/restlos
-Vcs-Browser: https://github.com/jurkast/restlos
-Vcs-Git: https://github.com/jurkast/restlos.git
+Homepage: https://github.com/jurkast/restlos-uninstaller
+Vcs-Browser: https://github.com/jurkast/restlos-uninstaller
+Vcs-Git: https://github.com/jurkast/restlos-uninstaller.git
 
 Package: restlos-uninstaller
 Architecture: all
 Depends:
  gir1.2-gtk-4.0,
  hicolor-icon-theme,
+ openssl,
  policykit-1,
  python3 (>= 3.10),
  python3-gi,

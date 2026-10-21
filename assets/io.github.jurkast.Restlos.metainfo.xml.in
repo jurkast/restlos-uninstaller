@@ -49,9 +49,9 @@
     <keyword xml:lang="de">deinstallieren</keyword>
     <keyword xml:lang="de">löschen</keyword>
   </keywords>
-  <url type="homepage">https://github.com/jurkast/restlos</url>
-  <url type="bugtracker">https://github.com/jurkast/restlos/issues</url>
-  <url type="help">https://github.com/jurkast/restlos/blob/main/README.en.md</url>
+  <url type="homepage">https://github.com/jurkast/restlos-uninstaller</url>
+  <url type="bugtracker">https://github.com/jurkast/restlos-uninstaller/issues</url>
+  <url type="help">https://github.com/jurkast/restlos-uninstaller/blob/main/README.en.md</url>
   <content_rating type="oars-1.1" />
   <releases>
     <release version="@VERSION@" date="@DATE@" type="development">

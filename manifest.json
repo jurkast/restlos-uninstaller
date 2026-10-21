@@ -3,13 +3,19 @@
   "name": "Restlos Uninstaller",
   "tagline": "Safe Linux App & Game Uninstaller",
   "app_id": "io.github.jurkast.Restlos",
-  "version": "2.0.0",
-  "languages": ["de", "en"],
+  "version": "2.1.0",
+  "languages": [
+    "de",
+    "en"
+  ],
   "safety_backup": true,
   "minimum_python": "3.10",
   "gui": "GTK 4",
-  "package_formats": ["tar.gz", "deb"],
-  "homepage": "https://github.com/jurkast/restlos",
+  "package_formats": [
+    "tar.gz",
+    "deb"
+  ],
+  "homepage": "https://github.com/jurkast/restlos-uninstaller",
   "supported_sources": [
     "APT/DEB",
     "DNF/RPM",

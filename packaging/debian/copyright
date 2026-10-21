@@ -1,6 +1,6 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: Restlos Uninstaller
-Source: https://github.com/jurkast/restlos
+Source: https://github.com/jurkast/restlos-uninstaller
 
 Files: *
 Copyright: 2026 jurkast

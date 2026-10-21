@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 APP_ID = "io.github.jurkast.Restlos"
 LEGACY_APP_IDS = ("io.github.jurkastl.Restlos", "io.github.local.Restlos")
 SELF_PACKAGE_IDS = ("restlos", "restlos-uninstaller")
 APP_NAME = "Restlos Uninstaller"
 APP_TAGLINE = "Safe Linux App & Game Uninstaller"
-PROJECT_URL = "https://github.com/jurkast/restlos"
+PROJECT_URL = "https://github.com/jurkast/restlos-uninstaller"
