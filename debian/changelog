@@ -1,3 +1,9 @@
+restlos-uninstaller (2.2.0-1ppa1) UNRELEASED; urgency=medium
+
+  * Precise process handling, instant update rollback, leftover finder, backup and recovery fixes.
+
+ -- jurkast <312310339+jurkast@users.noreply.github.com>  Thu, 22 Oct 2026 00:59:41 +0200
+
 restlos-uninstaller (2.1.0-1ppa1) UNRELEASED; urgency=medium
 
   * Restlos Bewerbung design, signed hourly self-updates, fixed update repository.

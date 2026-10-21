@@ -185,14 +185,20 @@ class BackupManager:
                 members = [member for member in archive.getmembers() if self._is_member_of(member.name, base)]
                 if not members:
                     raise BackupError("Backup-Eintrag fehlt im Archiv")
+                links: list[tuple[Path, str]] = []
                 for member in sorted(members, key=lambda value: len(PurePosixPath(value.name).parts)):
-                    if member.issym() or member.islnk() or member.isdev() or member.isfifo():
+                    if member.islnk() or member.isdev() or member.isfifo():
                         raise BackupError("Backup enthält einen nicht zulässigen Dateityp")
                     member_path = PurePosixPath(member.name)
                     relative = member_path.relative_to(base)
                     destination = original.joinpath(*relative.parts) if relative.parts else original
                     if not is_within(destination, original):
                         raise BackupError("Backup-Pfad verlässt sein Wiederherstellungsziel")
+                    if member.issym():
+                        if not relative.parts or "\0" in member.linkname:
+                            raise BackupError("Backup enthält einen nicht zulässigen Dateityp")
+                        links.append((destination, member.linkname))
+                        continue
                     if member.isdir():
                         destination.mkdir(parents=True, exist_ok=False)
                         created_root = True
@@ -209,6 +215,13 @@ class BackupManager:
                         created_root = True
                     else:
                         raise BackupError("Backup enthält einen unbekannten Dateityp")
+                # Links erst ganz zum Schluss anlegen: Keine wiederhergestellte Datei kann so durch
+                # einen Link hindurch an einen fremden Ort geschrieben werden.
+                for destination, target in links:
+                    if not destination.parent.is_dir() or destination.parent.is_symlink():
+                        raise BackupError("Backup-Pfad verlässt sein Wiederherstellungsziel")
+                    os.symlink(target, destination)
+                    created_root = True
                 for destination, mode in reversed(directory_modes):
                     os.chmod(destination, mode)
         except (OSError, tarfile.TarError, ValueError) as error:
@@ -223,7 +236,13 @@ class BackupManager:
 
     def _add_path(self, archive: tarfile.TarFile, path: Path, member: str) -> None:
         info = archive.gettarinfo(str(path), arcname=member)
-        if info.issym() or info.islnk() or info.isdev() or info.isfifo():
+        if info.islnk():
+            # Weiterer Name einer bereits gesicherten Datei (in Wine-/Proton-Präfixen üblich):
+            # als eigenständige Datei sichern, statt das ganze Backup abzubrechen.
+            info.type = tarfile.REGTYPE
+            info.linkname = ""
+            info.size = path.stat(follow_symlinks=False).st_size
+        if info.issym() or info.isdev() or info.isfifo():
             raise BackupError(f"Nicht zulässiger Dateityp im Backup: {path}")
         if info.isdir():
             archive.addfile(info)
@@ -232,9 +251,18 @@ class BackupManager:
             except OSError as error:
                 raise BackupError(f"Backup-Ordner konnte nicht gelesen werden: {path}: {error}") from error
             for child in children:
-                if child.is_symlink():
+                child_member = f"{member}/{child.name}"
+                try:
+                    mode = child.lstat().st_mode
+                except OSError as error:
+                    raise BackupError(f"Backup-Eintrag konnte nicht gelesen werden: {child}: {error}") from error
+                if stat.S_ISLNK(mode):
+                    # Links (z. B. dosdevices/c: in Wine) werden als Link gesichert, nie verfolgt.
+                    archive.addfile(archive.gettarinfo(str(child), arcname=child_member))
                     continue
-                self._add_path(archive, child, f"{member}/{child.name}")
+                if not (stat.S_ISDIR(mode) or stat.S_ISREG(mode)):
+                    continue  # Sockets/FIFOs sind Laufzeitobjekte, keine Daten.
+                self._add_path(archive, child, child_member)
         elif info.isfile() and stat.S_ISREG(path.stat(follow_symlinks=False).st_mode):
             with path.open("rb") as source:
                 archive.addfile(info, source)

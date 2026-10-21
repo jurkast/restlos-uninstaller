@@ -39,6 +39,7 @@
 - bietet zusätzlich eine Terminaloberfläche für Listen und Löschpläne
 - besitzt eine vollständige deutsche und englische Oberfläche mit Sprachwahl im Menü
 - verwendet dasselbe Restlos-Design wie Restlos Bewerbung: dunkle Petrol-Navigation, helle Karten, Mint-Akzente, Hell/Dunkel-Umschalter
+- findet unter **Reste finden** verwaiste Daten deinstallierter Programme (Einstellungen, Zwischenspeicher, Flatpak- und Snap-Daten) und entfernt sie über den geprüften Löschplan
 - aktualisiert sich selbst: stündliche Prüfung, Ed25519-signierte Updates, Aktivierung per „Jetzt neu starten und aktualisieren“ und automatischer Rückfall, falls eine neue Version nicht startet
 
 Restlos zeigt bewusst **Anwendungen, Spiele und eigenständige Programmumgebungen** und keine Tausenden Bibliotheks- oder Kernelpakete an.
@@ -63,10 +64,10 @@ Die aktuelle Ausgabe von der [Release-Seite](https://github.com/jurkast/restlos-
 Das native Debian-Paket wird über die grafische Softwareverwaltung oder vollständig im Terminal installiert. APT installiert dabei die benötigten GTK- und Python-Abhängigkeiten automatisch:
 
 ```bash
-curl -LO https://github.com/jurkast/restlos-uninstaller/releases/download/v2.1.0/restlos-uninstaller_2.1.0-1_all.deb
-curl -LO https://github.com/jurkast/restlos-uninstaller/releases/download/v2.1.0/restlos-uninstaller_2.1.0-1_all.deb.sha256
-sha256sum --check restlos-uninstaller_2.1.0-1_all.deb.sha256
-sudo apt install ./restlos-uninstaller_2.1.0-1_all.deb
+curl -LO https://github.com/jurkast/restlos-uninstaller/releases/download/v2.2.0/restlos-uninstaller_2.2.0-1_all.deb
+curl -LO https://github.com/jurkast/restlos-uninstaller/releases/download/v2.2.0/restlos-uninstaller_2.2.0-1_all.deb.sha256
+sha256sum --check restlos-uninstaller_2.2.0-1_all.deb.sha256
+sudo apt install ./restlos-uninstaller_2.2.0-1_all.deb
 ```
 
 Der Menüeintrag startet ausdrücklich die systemweite Paketversion. Falls daneben eine ältere Benutzerinstallation unter `~/.local/bin/restlos` liegt, lautet der eindeutige Terminalpfad `/usr/bin/restlos`.
@@ -76,11 +77,11 @@ Der Menüeintrag startet ausdrücklich die systemweite Paketversion. Falls daneb
 Für Fedora, Arch Linux, openSUSE oder eine benutzerbezogene Installation:
 
 ```bash
-curl -LO https://github.com/jurkast/restlos-uninstaller/releases/download/v2.1.0/Restlos-2.1.0.tar.gz
-curl -LO https://github.com/jurkast/restlos-uninstaller/releases/download/v2.1.0/Restlos-2.1.0.sha256
-sha256sum --check Restlos-2.1.0.sha256
-tar -xzf Restlos-2.1.0.tar.gz
-cd Restlos-2.1.0
+curl -LO https://github.com/jurkast/restlos-uninstaller/releases/download/v2.2.0/Restlos-2.2.0.tar.gz
+curl -LO https://github.com/jurkast/restlos-uninstaller/releases/download/v2.2.0/Restlos-2.2.0.sha256
+sha256sum --check Restlos-2.2.0.sha256
+tar -xzf Restlos-2.2.0.tar.gz
+cd Restlos-2.2.0
 ./install.sh
 ```
 
@@ -166,14 +167,14 @@ Restlos aktualisiert sich nach demselben Verfahren wie Restlos Bewerbung:
 
 Unter **Updates & Startcheck** lassen sich die automatische Prüfung abschalten, sofort prüfen oder zur vorherigen Version zurückschalten. Protokolle, Wiederherstellungsdaten und Einstellungen bleiben bei jedem Update unverändert.
 
-**Einmalig für Versionen bis 2.0:** Ältere Ausgaben kennen das signierte Verfahren noch nicht. Version 2.1.0 deshalb einmal über das Debian-Paket oder `install.sh` installieren – danach kommen alle weiteren Updates automatisch.
+**Einmalig für Versionen bis 2.0:** Ältere Ausgaben kennen das signierte Verfahren noch nicht. Version 2.2.0 deshalb einmal über das Debian-Paket oder `install.sh` installieren – danach kommen alle weiteren Updates automatisch.
 
 Neue Releases entstehen automatisch, sobald Programmänderungen auf `main` landen (siehe `.github/workflows/release.yml`). Einmalig muss dafür unter *Settings → Secrets and variables → Actions* das Secret `RESTLOS_SIGNING_KEY` mit demselben privaten Schlüssel wie bei Restlos Bewerbung angelegt werden.
 
 Manuell bleibt der versionsbasierte Installer weiterhin nutzbar:
 
 ```bash
-./update.sh /pfad/zu/Restlos-2.1.0.tar.gz
+./update.sh /pfad/zu/Restlos-2.2.0.tar.gz
 ```
 
 ## Restlos selbst entfernen

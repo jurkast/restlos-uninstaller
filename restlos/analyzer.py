@@ -19,6 +19,29 @@ from .safety import seal_plan
 from .sharing import protect_shared_targets
 
 
+DESKTOP_SUFFIXES = (".desktop",)
+INSTALLER_SUFFIXES = (
+    ".appimage", ".deb", ".rpm", ".flatpakref", ".flatpak", ".snap", ".run", ".sh", ".bin",
+    ".exe", ".msi", ".zip", ".7z", ".rar", ".tar", ".tar.gz", ".tgz", ".tar.xz", ".txz",
+    ".tar.bz2", ".tar.zst",
+)
+
+
+INSTALLER_FOLDER_TOKENS = ("installer", "setup", "linux", "x86_64", "x8664", "amd64", "x64", "portable")
+
+
+def _has_suffix(path: Path, suffixes: tuple[str, ...]) -> bool:
+    """Dateien mit passender Endung; Ordner nur, wenn ihr Name erkennbar einen Installer bezeichnet."""
+    name = path.name.casefold()
+    try:
+        is_directory = path.is_dir() and not path.is_symlink()
+    except OSError:
+        return False
+    if is_directory:
+        return suffixes is INSTALLER_SUFFIXES and any(token in name for token in INSTALLER_FOLDER_TOKENS)
+    return name.endswith(suffixes)
+
+
 class UnsafeTargetError(ValueError):
     pass
 
@@ -395,13 +418,26 @@ class RemovalAnalyzer:
             (self.home / "Desktop", "Desktop-Datei"),
             (self.home / "Schreibtisch", "Desktop-Datei"),
         )
+        # Schreibtisch und Downloads enthalten vor allem eigene Dateien der Nutzerin oder des Nutzers.
+        # Ein Ordner „Krita“ mit eigenen Bildern darf nie als Programmrest gelten: dort zählen nur
+        # Starter (.desktop) bzw. typische Installer-Dateien, und Installer werden nie vorausgewählt.
+        personal_roots = {
+            self.home / "Desktop": DESKTOP_SUFFIXES,
+            self.home / "Schreibtisch": DESKTOP_SUFFIXES,
+            self.home / "Downloads": INSTALLER_SUFFIXES,
+        }
         result: list[tuple[Path, str, Confidence]] = []
         for root, reason in roots:
             if not root.is_dir():
                 continue
+            allowed_suffixes = personal_roots.get(root)
             try:
                 for path in root.iterdir():
+                    if allowed_suffixes is not None and not _has_suffix(path, allowed_suffixes):
+                        continue
                     confidence = self._match_confidence(path.name, aliases)
+                    if confidence and root == self.home / "Downloads":
+                        confidence = Confidence.POSSIBLE
                     if confidence:
                         result.append((path, reason, confidence))
             except OSError:

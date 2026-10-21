@@ -429,6 +429,22 @@ class Updater:
         self.save_config(blocked=blocked)
         self._record("rolled-back", version=blocked)
 
+    def abandon_failed_launch(self, version: str, *, crashed: bool) -> bool:
+        """Nach dem Ende einer gestarteten Version: hat sie ihren Start nie bestätigt?
+
+        Gibt True zurück, wenn sie abgestürzt ist und deshalb sofort zurückgeschaltet wurde.
+        Ohne Absturz (z. B. beim Abmelden beendet) wird nur der offene Start-Handshake verworfen,
+        damit der nächste Start nicht fälschlich zurückschaltet.
+        """
+        pending = _read_json(self.home / "launch-pending.json")
+        if pending.get("version") != version or pending.get("pid") != os.getpid():
+            return False
+        if not crashed:
+            (self.home / "launch-pending.json").unlink(missing_ok=True)
+            return False
+        self.rollback(failed_version=version)
+        return True
+
     def startup_ready(self) -> None:
         pending = _read_json(self.home / "launch-pending.json")
         if pending.get("version") == self.running_version():

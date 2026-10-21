@@ -10,7 +10,7 @@ import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Callable, NamedTuple
 
 from . import __version__
 from .analyzer import PathGuard, RemovalAnalyzer, UnsafeTargetError
@@ -23,6 +23,19 @@ from .scanners import ApplicationScanner
 
 
 ProgressCallback = Callable[[str, float], None]
+
+# Launcher, deren Bibliotheksdatei Restlos ändert. Sie halten die Bibliothek im Speicher und
+# würden das entfernte Spiel beim Beenden sonst wieder eintragen.
+LAUNCHER_COMMANDS: dict[SourceKind, frozenset[str]] = {
+    SourceKind.LUTRIS: frozenset({"lutris"}),
+    SourceKind.HEROIC: frozenset({"heroic", "heroic games launcher"}),
+}
+
+
+class RelatedProcess(NamedTuple):
+    pid: int
+    name: str
+    launcher: bool = False
 
 
 class RemovalExecutor:
@@ -45,13 +58,29 @@ class RemovalExecutor:
         self.backup = backup or BackupManager(self.home, state_home=self.state_home)
         self.inventory_provider = inventory_provider or (lambda: ApplicationScanner(self.home).scan())
 
-    def related_processes(self, plan: RemovalPlan) -> list[tuple[int, str]]:
+    def related_processes(self, plan: RemovalPlan, *, proc: Path = Path("/proc")) -> list[RelatedProcess]:
+        """Prozesse, die die ausgewählten Daten wirklich benutzen – nicht alles, was „steam“ heißt.
+
+        Ein Prozess gehört dazu, wenn sein Programm, Arbeitsordner, ein Befehlszeilenpfad oder sein
+        WINEPREFIX/Proton-Präfix in einem ausgewählten Ziel liegt. Launcher (Lutris, Heroic) werden
+        nur dann einbezogen, wenn Restlos deren Bibliotheksdatei ändert, und nur höflich beendet.
+        """
         roots = [target.path.absolute() for target in plan.selected_targets]
+        directories = [root for root in roots if root.is_dir() and not root.is_symlink()]
+        files = {root for root in roots if root not in directories}
+        launchers = LAUNCHER_COMMANDS.get(plan.app.source, frozenset()) if any(
+            action.internal_kind for action in plan.actions
+        ) else frozenset()
         own_pids = {os.getpid(), os.getppid()}
-        matches: list[tuple[int, str]] = []
-        proc = Path("/proc")
+        matches: list[RelatedProcess] = []
         if not proc.is_dir():
             return matches
+
+        def inside(value: Path | None) -> bool:
+            if value is None:
+                return False
+            return value in files or any(self._is_within(value, root) for root in directories)
+
         for entry in proc.iterdir():
             if not entry.name.isdigit():
                 continue
@@ -67,52 +96,67 @@ class RemovalExecutor:
             except OSError:
                 cwd = None
             try:
-                cmdline = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
+                arguments = [part.decode(errors="replace") for part in (entry / "cmdline").read_bytes().split(b"\0") if part]
             except OSError:
-                cmdline = ""
+                arguments = []
             try:
                 command = (entry / "comm").read_text(errors="replace").strip()
             except OSError:
                 command = "unbekannter Prozess"
-            related = False
-            for root in roots:
-                if root.is_dir():
-                    related = related or (exe is not None and self._is_within(exe, root))
-                    related = related or (cwd is not None and self._is_within(cwd, root))
-                elif exe is not None:
-                    related = related or exe == root
-            manager_tokens = {
-                SourceKind.LUTRIS: ("lutris",),
-                SourceKind.STEAM: ("steam", "steamwebhelper"),
-                SourceKind.HEROIC: ("heroic",),
-                SourceKind.BOTTLES: ("bottles",),
-                SourceKind.PLAYONLINUX: ("playonlinux",),
-            }.get(plan.app.source, ())
-            process_text = f"{command} {cmdline}".casefold()
-            if manager_tokens and any(token in process_text for token in manager_tokens):
-                related = True
-            if not related:
+            related = inside(exe) or inside(cwd) or any(
+                inside(Path(argument)) for argument in arguments if argument.startswith("/") and "\0" not in argument
+            )
+            if not related and directories:
+                related = any(inside(Path(value)) for value in self._prefix_environment(entry))
+            if related:
+                matches.append(RelatedProcess(pid, command))
                 continue
-            matches.append((pid, command))
+            names = {command.casefold(), exe.name.casefold() if exe is not None else ""}
+            if arguments:
+                names.add(Path(arguments[0]).name.casefold())
+            if launchers and names & launchers:
+                matches.append(RelatedProcess(pid, command, launcher=True))
         return matches
 
-    def stop_processes(self, processes: list[tuple[int, str]]) -> None:
-        for pid, _ in processes:
+    @staticmethod
+    def _prefix_environment(entry: Path) -> list[str]:
+        try:
+            raw = (entry / "environ").read_bytes()
+        except OSError:
+            return []
+        values: list[str] = []
+        for item in raw.split(b"\0"):
+            key, _separator, value = item.partition(b"=")
+            if key in {b"WINEPREFIX", b"STEAM_COMPAT_DATA_PATH"} and value.startswith(b"/"):
+                values.append(value.decode(errors="replace"))
+        return values
+
+    def stop_processes(self, processes: list[tuple[int, str]] | list[RelatedProcess]) -> list[RelatedProcess]:
+        """Programme beenden (notfalls hart), Launcher nur bitten. Gibt laufende Launcher zurück."""
+        normalized = [
+            item if isinstance(item, RelatedProcess) else RelatedProcess(int(item[0]), str(item[1]))
+            for item in processes
+        ]
+        for item in normalized:
             try:
-                os.kill(pid, signal.SIGTERM)
+                os.kill(item.pid, signal.SIGTERM)
             except (ProcessLookupError, PermissionError):
                 continue
-        deadline = time.monotonic() + 2.0
-        while time.monotonic() < deadline:
-            remaining = [pid for pid, _ in processes if Path(f"/proc/{pid}").exists()]
-            if not remaining:
-                return
+
+        def alive(item: RelatedProcess) -> bool:
+            return Path(f"/proc/{item.pid}").exists()
+
+        deadline = time.monotonic() + (6.0 if any(item.launcher for item in normalized) else 3.0)
+        while time.monotonic() < deadline and any(alive(item) for item in normalized):
             time.sleep(0.1)
-        for pid, _ in processes:
+        for item in normalized:
+            if item.launcher or not alive(item):
+                continue
             try:
-                os.kill(pid, signal.SIGKILL)
+                os.kill(item.pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
                 continue
+        return [item for item in normalized if item.launcher and alive(item)]
 
     def execute(
         self,
@@ -141,7 +185,15 @@ class RemovalExecutor:
         processes = self.related_processes(plan)
         if processes and stop_processes:
             callback("Laufende Prozesse werden beendet …", 0.02)
-            self.stop_processes(processes)
+            stopped = self.stop_processes(processes)
+            still_running = [item for item in stopped if isinstance(item, RelatedProcess)] if isinstance(stopped, list) else []
+            if still_running:
+                names = ", ".join(sorted({item.name for item in still_running}))
+                result.errors.append(
+                    _("{names} läuft noch. Bitte schließen und erneut entfernen – es wurde nichts verändert.",
+                      names=names)
+                )
+                return self._finish(plan, result, permanent)
         elif processes:
             result.errors.append("Die Anwendung läuft noch und wurde nicht beendet.")
             return self._finish(plan, result, permanent)

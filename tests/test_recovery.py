@@ -96,6 +96,24 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual((config / "settings.json").read_text(encoding="utf-8"), '{"theme":"dark"}')
         self.assertEqual(manager.list_records(), [])
 
+    def test_partially_emptied_trash_still_restores_the_rest(self) -> None:
+        first, second = self.home / ".config/demo-app", self.home / ".cache/demo-app"
+        for path in (first, second):
+            path.mkdir()
+            (path / "data").write_text("x", encoding="utf-8")
+        plan = RemovalPlan(app=self.app, targets=[
+            RemovalTarget(first, "Einstellungen", 1, Confidence.CERTAIN),
+            RemovalTarget(second, "Zwischenspeicher", 1, Confidence.CERTAIN),
+        ])
+        seal_plan(plan, [], home=self.home)
+        result = RemovalExecutor(self.home, trash=self.trash).execute(plan, permanent=False)
+        self.assertTrue(result.success, result.errors)
+        emptied = next(uri for uri, original in self.trash.entries.items() if original == str(second))
+        self.trash.entries.pop(emptied)  # Nutzer hat diesen Eintrag endgültig gelöscht.
+        restored = RecoveryManager(self.home, trash=self.trash).restore(result.recovery_id)
+        self.assertTrue(restored.success, restored.errors)
+        self.assertEqual(restored.restored_paths, [str(first)])
+
     def test_restore_never_overwrites_a_recreated_path(self) -> None:
         config = self.home / ".config/demo-app"
         config.mkdir()
